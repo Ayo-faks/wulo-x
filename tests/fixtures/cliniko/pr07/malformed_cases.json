@@ -1,0 +1,6 @@
+{
+  "success_not_json": "not-json",
+  "success_missing_id": {"unexpected": "synthetic"},
+  "error_not_json": "not-json",
+  "success_wrong_content_type": "text/plain"
+}

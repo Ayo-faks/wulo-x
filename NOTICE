@@ -1,0 +1,13 @@
+Wulo-X
+Copyright (c) 2026 Wulo-X contributors
+
+This project includes and modifies material from ART Voice Agent Accelerator:
+https://github.com/aiappsgbbfactory/art-voice-agent-accelerator
+
+ART Voice Agent Accelerator was created by Pablo Salvador Lopez and Jin Lee.
+Its included material is licensed under the MIT License. The original copyright
+notice and license terms are retained in LICENSE.
+
+Wulo-X adds the Clinic Recall domain, deterministic safety and booking controls,
+tenant isolation, evaluation assets, provider integrations, operational tooling,
+and related user interfaces.

@@ -1,0 +1,36 @@
+[project]
+name = "voicekit-fakes"
+version = "0.1.0.dev0"
+description = "Offline deterministic test fakes and scenarios for realtime voice agents (Azure VoiceLive, Twilio Media Streams)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Wulo-X contributors" }]
+keywords = ["voice", "realtime", "testing", "fakes", "twilio", "voicelive", "dead-air"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: Pytest",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Testing :: Mocking",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+contract = ["azure-ai-voicelive[aiohttp]>=1.0.0"]
+
+[project.entry-points.pytest11]
+voicekit = "voicekit.pytest_plugin"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/voicekit"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

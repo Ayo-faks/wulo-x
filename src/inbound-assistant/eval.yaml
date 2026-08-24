@@ -1,0 +1,16 @@
+name: inbound-smoke-core
+agent:
+    name: inbound-assistant
+    kind: hosted
+    version: "8"
+dataset:
+    local_uri: ../../.agentops/data/inbound-smoke.jsonl
+evaluators:
+    - builtin.coherence
+    - builtin.fluency
+    - name: inbound-smoke-core
+      version: "2"
+      local_uri: evaluators/smoke-core/rubric_dimensions.json
+options:
+    eval_model: gpt-4o-mini
+max_samples: 15

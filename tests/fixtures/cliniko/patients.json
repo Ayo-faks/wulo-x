@@ -1,0 +1,40 @@
+{
+  "patients": [
+    {
+      "id": "900000001",
+      "first_name": "SYNTH Ada",
+      "preferred_first_name": "SYNTH Addie",
+      "last_name": "Example",
+      "email": "SYNTH.PATIENT@example.invalid",
+      "patient_phone_numbers": [
+        {
+          "normalized_number": "447700900101",
+          "number": "07700 900101",
+          "phone_type": "Mobile"
+        }
+      ],
+      "accepted_email_marketing": true,
+      "accepted_sms_marketing": true,
+      "accepted_privacy_policy": true,
+      "archived_at": null,
+      "updated_at": "2026-07-20T08:00:00Z",
+      "extra_provider_field": "SYNTH DISCARD"
+    },
+    {
+      "id": "900000002",
+      "first_name": "SYNTH Grace",
+      "preferred_first_name": null,
+      "last_name": "Fixture",
+      "email": null,
+      "patient_phone_numbers": null,
+      "accepted_email_marketing": null,
+      "accepted_sms_marketing": null,
+      "accepted_privacy_policy": null,
+      "archived_at": "2026-07-20T09:00:00Z",
+      "updated_at": "2026-07-20T09:00:00Z",
+      "extra_provider_field": "SYNTH DISCARD"
+    }
+  ],
+  "total_entries": 2,
+  "links": {}
+}

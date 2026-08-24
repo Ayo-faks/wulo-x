@@ -1,0 +1,46 @@
+{
+  "name": "wulo-x-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 5173",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0 --port 8080",
+    "start": "node server.mjs",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed"
+  },
+  "dependencies": {
+    "@azure/communication-calling": "^1.34.1",
+    "@azure/communication-common": "^2.3.1",
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.1",
+    "@mui/icons-material": "^7.3.4",
+    "@mui/material": "^7.3.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.21.0",
+    "@playwright/test": "^1.58.2",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "^4.5.2",
+    "dotenv": "^16.5.0",
+    "eslint": "^10.8.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.3",
+    "globals": "^15.15.0",
+    "js-yaml": "^4.3.1",
+    "lucide-react": "^0.501.0",
+    "prop-types": "^15.8.1",
+    "reagraph": "^4.30.7",
+    "styled-components": "^6.1.19",
+    "vite": "^6.4.1"
+  },
+  "overrides": {
+    "brace-expansion": "5.0.9",
+    "nanoid": "3.3.18"
+  }
+}

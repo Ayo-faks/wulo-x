@@ -1,0 +1,188 @@
+# Banking Customer Service Scenario
+# Optimized for private banking and wealth management
+
+name: banking
+description: Private banking customer service with personalized greetings and financial tools
+icon: "🏦"
+
+# Starting agent
+start_agent: BankingConcierge
+
+# Agents to include in this scenario
+# Flow: BankingConcierge (entry) → CardRecommendation OR InvestmentAdvisor
+# Both specialists can handoff to each other and return to BankingConcierge
+agents:
+  - BankingConcierge
+  - CardRecommendation
+  - InvestmentAdvisor
+  - DeclineSpecialist
+  - FraudAgent
+
+# Handoff behavior - default for unlisted routes
+handoff_type: announced
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Handoff Graph - Directed edges between agents
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#                         ┌──────────────────────────────────────────────┐
+#                         │                                              │
+#                         ▼                                              │
+#                  ┌───────────────┐                                     │
+#                  │BankingConcierge│ (Entry Point)                      │
+#                  └───────┬───────┘                                     │
+#                          │                                             │
+#         ┌────────────────┼────────────────┬───────────────┐            │
+#         │                │                │               │            │
+#         ▼                ▼                ▼               ▼            │
+#  ┌──────────────┐ ┌────────────────┐ ┌──────────────┐ ┌──────────┐    │
+#  │    Card      │ │   Investment   │ │   Decline    │ │  Fraud   │    │
+#  │Recommendation│ │    Advisor     │ │  Specialist  │ │  Agent   │    │
+#  └──────┬───────┘ └───────┬────────┘ └──────┬───────┘ └──────────┘    │
+#         │                 │                 │                          │
+#         │◄───────────────►│                 │                          │
+#         │  (bidirectional)                  │                          │
+#         │                 │                 ▼                          │
+#         │                 │          ┌──────────┐                      │
+#         │                 │          │  Fraud   │                      │
+#         │                 │          │  Agent   │                      │
+#         │                 │          └──────────┘                      │
+#         │                 │                                            │
+#         └─────────────────┴────────────────────────────────────────────┘
+#                    (CardRec & InvestAdv return to BankingConcierge)
+#
+# Legend:
+#   → = one-way handoff (discrete or announced)
+#   ◄─► = bidirectional handoff
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+handoffs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # BankingConcierge → Specialists (Entry routes)
+  # ─────────────────────────────────────────────────────────────────────────────
+  - from: BankingConcierge
+    to: CardRecommendation
+    tool: handoff_card_recommendation
+    type: discrete            # Seamless - same conversation continues
+    share_context: true
+    handoff_condition: |
+      Transfer to CardRecommendation when the customer:
+      - Asks about credit cards, debit cards, or card benefits
+      - Wants to compare card options or upgrade their card
+      - Has questions about card rewards, cashback, or travel points
+      - Needs help choosing the right card for their spending habits
+
+  - from: BankingConcierge
+    to: InvestmentAdvisor
+    tool: handoff_investment_advisor
+    type: discrete            # Seamless - same conversation continues
+    share_context: true
+    handoff_condition: |
+      Transfer to InvestmentAdvisor when the customer:
+      - Expresses interest in investing, stocks, bonds, or mutual funds
+      - Asks about retirement planning (401k, IRA, pension)
+      - Wants wealth management or portfolio advice
+      - Has questions about market conditions or investment strategies
+
+  - from: BankingConcierge
+    to: DeclineSpecialist
+    tool: handoff_to_agent
+    type: announced
+    share_context: true
+    handoff_condition: |
+      Transfer to DeclineSpecialist when the customer:
+      - Mentions a declined transaction or payment issue
+      - Asks about reasons for a declined card or payment
+      - Needs assistance resolving a declined transaction
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Cross-Specialist Handoffs (expertise-based routing)
+  # ─────────────────────────────────────────────────────────────────────────────
+  - from: CardRecommendation
+    to: InvestmentAdvisor
+    tool: handoff_investment_advisor
+    type: discrete            # Seamless transition between specialists
+    share_context: true
+    handoff_condition: |
+      Transfer to InvestmentAdvisor when the customer:
+      - Shifts the conversation from cards to investments
+      - Asks about earning interest or growing their money
+      - Mentions retirement or long-term savings goals
+
+  - from: InvestmentAdvisor
+    to: CardRecommendation
+    tool: handoff_card_recommendation
+    type: discrete            # Seamless transition between specialists
+    share_context: true
+    handoff_condition: |
+      Transfer to CardRecommendation when the customer:
+      - Shifts the conversation from investments to cards
+      - Asks about spending tools or payment methods
+      - Wants a card with investment rewards or benefits
+
+  - from: BankingConcierge
+    to: FraudAgent
+    tool: handoff_to_agent
+    type: announced
+    share_context: true
+    handoff_condition: |
+      Transfer to FraudAgent when the customer:
+      - Reports suspected fraudulent activity on their account
+      - Asks about fraud prevention or security measures
+      - Needs to dispute a transaction due to fraud
+
+  - from: DeclineSpecialist
+    to: FraudAgent
+    tool: handoff_to_agent
+    type: announced
+    share_context: true
+    handoff_condition: |
+      Transfer to FraudAgent when the customer:
+      - Indicated by Orchestrator Actions from the decline code.
+      - Indicates that a declined transaction may be due to fraud
+      - Expresses concern about unauthorized activity on their account
+      - Requests assistance with disputing a potentially fraudulent transaction
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Return to BankingConcierge (all specialists can return)
+  # ─────────────────────────────────────────────────────────────────────────────
+  - from: CardRecommendation
+    to: BankingConcierge
+    tool: handoff_concierge
+    type: discrete            # Seamless return
+    handoff_condition: |
+      Return to BankingConcierge when the customer:
+      - Has completed their card inquiry and needs general assistance
+      - Asks about account balances, transfers, or other banking services
+      - Wants to speak with the main representative
+
+  - from: InvestmentAdvisor
+    to: BankingConcierge
+    tool: handoff_concierge
+    type: discrete            # Seamless return
+    handoff_condition: |
+      Return to BankingConcierge when the customer:
+      - Has completed their investment inquiry and needs general assistance
+      - Asks about day-to-day banking needs
+      - Wants to speak with the main representative
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Generic Handoff Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+# Enables the handoff_to_agent tool for dynamic agent transfers without
+# requiring explicit handoff tool definitions for every agent pair.
+
+generic_handoff:
+  enabled: true
+  # allowed_targets: []       # Empty = all scenario agents allowed
+  default_type: discrete      # Default handoff type (discrete/announced)
+  share_context: true         # Pass conversation context to target
+  require_client_id: false    # Whether client_id is required
+
+# Agent defaults applied to all agents
+agent_defaults:
+  company_name: "{{ institution_name | default('Contoso Bank') }}"
+  industry: "banking"
+  compliance_required: true
+  region: "US"

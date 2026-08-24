@@ -1,0 +1,497 @@
+{
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json",
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "content": {
+        "json": "# Clinic Recall Unified Operations\n**Environment:** `${environment_name}`  |  Runtime, release governance, safety, cost, deployment health, and aggregate product outcomes."
+      },
+      "name": "title"
+    },
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "9edbfaa7-5117-4e06-b937-49c4fb5a3525",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time range",
+            "type": 4,
+            "isRequired": true,
+            "value": { "durationMs": 604800000 },
+            "typeSettings": {
+              "selectableValues": [
+                { "durationMs": 3600000 },
+                { "durationMs": 14400000 },
+                { "durationMs": 43200000 },
+                { "durationMs": 86400000 },
+                { "durationMs": 172800000 },
+                { "durationMs": 604800000 },
+                { "durationMs": 1209600000 },
+                { "durationMs": 2592000000 }
+              ]
+            }
+          }
+        ],
+        "style": "above",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "time-range"
+    },
+    {
+      "type": 11,
+      "content": {
+        "version": "LinkItem/1.0",
+        "style": "tabs",
+        "links": [
+          { "cellValue": "selectedPage", "linkTarget": "parameter", "linkLabel": "Release", "subTarget": "release", "style": "link" },
+          { "cellValue": "selectedPage", "linkTarget": "parameter", "linkLabel": "Hill-Climb", "subTarget": "experiments", "style": "link" },
+          { "cellValue": "selectedPage", "linkTarget": "parameter", "linkLabel": "Voice UX", "subTarget": "voice", "style": "link" },
+          { "cellValue": "selectedPage", "linkTarget": "parameter", "linkLabel": "Safety", "subTarget": "safety", "style": "link" },
+          { "cellValue": "selectedPage", "linkTarget": "parameter", "linkLabel": "Agent Quality", "subTarget": "quality", "style": "link" },
+          { "cellValue": "selectedPage", "linkTarget": "parameter", "linkLabel": "CI & AgentOps", "subTarget": "ci", "style": "link" },
+          { "cellValue": "selectedPage", "linkTarget": "parameter", "linkLabel": "Cost & Reliability", "subTarget": "reliability", "style": "link" },
+          { "cellValue": "selectedPage", "linkTarget": "parameter", "linkLabel": "Deployments", "subTarget": "deployments", "style": "link" },
+          { "cellValue": "selectedPage", "linkTarget": "parameter", "linkLabel": "Business Outcomes", "subTarget": "business", "style": "link" },
+          { "cellValue": "selectedPage", "linkTarget": "parameter", "linkLabel": "Pilot Operations", "subTarget": "pilotops", "style": "link" }
+        ]
+      },
+      "name": "page-tabs"
+    },
+    {
+      "type": 1,
+      "content": { "json": "## Release Cockpit\nLatest gate posture, evidence freshness, and release identity." },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "release" },
+      "name": "release-heading"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "ClinicRecallMetrics_CL\n| where ${metric_environment_predicate}\n| summarize arg_max(TimeGenerated, *) by Source, Suite, MetricName\n| extend Status = case(isnull(Passed), 'INFO', Passed, 'PASS', 'FAIL')\n| project TimeGenerated, Source, Suite, MetricName, MetricValue, Unit, Comparator, Threshold, Status, GitSha, ImageTag, Revision, WorkflowRunUrl\n| order by Status asc, Source asc, MetricName asc",
+        "size": 0,
+        "title": "Latest release evidence",
+        "noDataMessage": "No CI evidence has been ingested for this environment.",
+        "timeContextFromParameter": "TimeRange",
+        "showRefreshButton": true,
+        "showExportToExcel": true,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"]
+      },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "release" },
+      "name": "release-evidence"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "ClinicRecallMetrics_CL\n| where ${metric_environment_predicate}\n| summarize arg_max(TimeGenerated, *) by Source, Suite, MetricName\n| summarize LastEvidence=max(TimeGenerated), Failed=countif(Passed == false), Sources=dcount(Source), Metrics=dcount(MetricName)\n| extend EvidenceAgeHours=round(datetime_diff('minute', now(), LastEvidence) / 60.0, 1)\n| extend Overall=case(Failed > 0, 'BLOCKED', EvidenceAgeHours > 26, 'STALE', 'READY')\n| project Overall, LastEvidence, EvidenceAgeHours, Failed, Sources, Metrics",
+        "size": 0,
+        "title": "Release posture",
+        "noDataMessage": "Release posture is unavailable until CI metrics are ingested.",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"],
+        "visualization": "tiles"
+      },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "release" },
+      "name": "release-posture"
+    },
+    {
+      "type": 1,
+      "content": { "json": "## Hill-Climb Comparison\nCandidate arms, control deltas, and promotion gates." },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "experiments" },
+      "name": "experiments-heading"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "ClinicRecallMetrics_CL\n| where ${metric_environment_predicate} and isnotempty(Arm)\n| summarize arg_max(TimeGenerated, MetricValue, Threshold, Comparator, Passed, ModelVersion, ProgrammeUuid) by Arm, MetricName\n| project Arm, MetricName, MetricValue, Comparator, Threshold, Passed, ModelVersion, ProgrammeUuid\n| order by MetricName asc, Arm asc",
+        "size": 0,
+        "title": "Latest arm comparison",
+        "noDataMessage": "No experiment-arm metrics have been ingested.",
+        "timeContextFromParameter": "TimeRange",
+        "showExportToExcel": true,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"]
+      },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "experiments" },
+      "name": "experiment-arms"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "ClinicRecallMetrics_CL\n| where ${metric_environment_predicate} and isnotempty(Arm)\n| summarize Value=avg(MetricValue) by bin(TimeGenerated, 1h), Arm, MetricName\n| order by TimeGenerated asc",
+        "size": 0,
+        "title": "Candidate trend",
+        "noDataMessage": "No experiment trend data is available.",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"],
+        "visualization": "timechart"
+      },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "experiments" },
+      "name": "experiment-trend"
+    },
+    {
+      "type": 1,
+      "content": { "json": "## Voice UX\nTurn latency, first audio, STT, TTS, and barge-in responsiveness." },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "voice" },
+      "name": "voice-heading"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppDependencies\n| where Name startswith 'voice.turn.' and Name endswith '.total'\n| extend FirstAudioMs=todouble(Properties['turn.ttfb_ms']), ModelTtftMs=todouble(Properties['turn.llm_ttft_ms']), SttMs=todouble(Properties['turn.stt_ms']), WallMs=todouble(Properties['turn.wall_ms'])\n| summarize Turns=count(), FirstAudioP50Ms=percentile(FirstAudioMs, 50), FirstAudioP95Ms=percentile(FirstAudioMs, 95), FirstAudioMaxMs=max(FirstAudioMs), ModelTtftP95Ms=percentile(ModelTtftMs, 95), SttP95Ms=percentile(SttMs, 95), WallP95Ms=percentile(WallMs, 95)",
+        "size": 0,
+        "title": "Voice latency percentiles",
+        "noDataMessage": "No voice latency metrics were exported in this time range.",
+        "timeContextFromParameter": "TimeRange",
+        "showRefreshButton": true,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"]
+      },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "voice" },
+      "name": "voice-percentiles"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppDependencies\n| where Name startswith 'voice.turn.' and Name endswith '.total'\n| extend FirstAudioMs=todouble(Properties['turn.ttfb_ms']), Transport=tostring(Properties['turn.transport_type'])\n| where isnotnull(FirstAudioMs)\n| summarize p50_ms=percentile(FirstAudioMs, 50), p95_ms=percentile(FirstAudioMs, 95), max_ms=max(FirstAudioMs) by bin(TimeGenerated, 15m), Transport\n| order by TimeGenerated asc",
+        "size": 0,
+        "title": "Voice latency trend",
+        "noDataMessage": "No voice latency trend is available.",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"],
+        "visualization": "timechart"
+      },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "voice" },
+      "name": "voice-trend"
+    },
+    {
+      "type": 1,
+      "content": { "json": "## Safety & Rights\nClinical boundaries, opt-out, escalation, and unauthorized-action hard stops." },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "safety" },
+      "name": "safety-heading"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "ClinicRecallMetrics_CL\n| where ${metric_environment_predicate}\n| where MetricName in ('safe_clinical_boundary', 'merged_safety_false_negatives', 'lexical_veto_downgrades', 'opt_out_misses', 'unauthorized_actions', 'severity_3_or_higher_traces', 'recall_assert_violations', 'inbound_assert_violations', 'recall_red_team_asr', 'inbound_red_team_asr')\n| summarize arg_max(TimeGenerated, *) by Suite, MetricName\n| project TimeGenerated, Suite, MetricName, MetricValue, Comparator, Threshold, Passed, ReasonCode\n| order by Passed asc, MetricName asc",
+        "size": 0,
+        "title": "Safety gate matrix",
+        "noDataMessage": "No safety evidence has been ingested.",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"]
+      },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "safety" },
+      "name": "safety-matrix"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppEvents\n| where Name in ('voice.escalation.triggered', 'voice.optout.recorded', 'voice.booking.created', 'voice.call.outcome')\n| extend Outcome=tostring(Properties['status']), Reason=tostring(Properties['reason'])\n| summarize Events=count() by bin(TimeGenerated, 1h), Name, Outcome, Reason\n| order by TimeGenerated asc",
+        "size": 0,
+        "title": "Runtime safety and rights events",
+        "noDataMessage": "No structured runtime safety events are available yet.",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"],
+        "visualization": "timechart"
+      },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "safety" },
+      "name": "runtime-safety-events"
+    },
+    {
+      "type": 1,
+      "content": { "json": "## Agent Quality\nPrompt-agent rubric scores, classifier validity, quality, and latency." },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "quality" },
+      "name": "quality-heading"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "ClinicRecallMetrics_CL\n| where ${metric_environment_predicate}\n| where MetricName in ('recall_smoke_core', 'inbound_smoke_core', 'coherence', 'fluency', 'safe_clinical_boundary', 'administrative_facet_macro_f1', 'classifier_response_schema_validity', 'classifier_independent_valid_completion_rate')\n| summarize Value=avg(MetricValue) by bin(TimeGenerated, 1d), MetricName, Suite\n| order by TimeGenerated asc",
+        "size": 0,
+        "title": "Quality trend",
+        "noDataMessage": "No quality metrics have been ingested.",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"],
+        "visualization": "timechart"
+      },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "quality" },
+      "name": "quality-trend"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "ClinicRecallMetrics_CL\n| where ${metric_environment_predicate} and MetricName startswith 'classifier_'\n| summarize arg_max(TimeGenerated, *) by MetricName\n| project MetricName, MetricValue, Unit, Comparator, Threshold, Passed, ModelVersion, ReasonCode\n| order by Passed asc, MetricName asc",
+        "size": 0,
+        "title": "Classifier contract",
+        "noDataMessage": "No classifier contract metrics have been ingested.",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"]
+      },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "quality" },
+      "name": "classifier-contract"
+    },
+    {
+      "type": 1,
+      "content": { "json": "## CI & AgentOps\nWorkflow health, ASSERT, Red Team, Doctor, and test evidence." },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "ci" },
+      "name": "ci-heading"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "ClinicRecallMetrics_CL\n| where ${metric_environment_predicate}\n| where Source in ('agentops', 'assert', 'red_team', 'doctor', 'pytest', 'voicekit', 'probe')\n| summarize Runs=dcount(EvidenceFingerprint), Passed=countif(Passed == true), Failed=countif(Passed == false), LastRun=max(TimeGenerated) by Source, WorkflowName\n| extend PassRate=round(100.0 * Passed / iif(Passed + Failed == 0, 1, Passed + Failed), 1)\n| project Source, WorkflowName, LastRun, Runs, Passed, Failed, PassRate\n| order by Failed desc, Source asc",
+        "size": 0,
+        "title": "Pipeline health",
+        "noDataMessage": "No CI metrics have been ingested.",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"]
+      },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "ci" },
+      "name": "pipeline-health"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "ClinicRecallMetrics_CL\n| where ${metric_environment_predicate} and Passed == false\n| project TimeGenerated, Source, Suite, WorkflowName, MetricName, MetricValue, Comparator, Threshold, ReasonCode, WorkflowRunUrl\n| order by TimeGenerated desc",
+        "size": 0,
+        "title": "Failed gates",
+        "noDataMessage": "No failed gates in the selected time range.",
+        "timeContextFromParameter": "TimeRange",
+        "showExportToExcel": true,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"]
+      },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "ci" },
+      "name": "failed-gates"
+    },
+    {
+      "type": 1,
+      "content": { "json": "## Cost & Reliability\nToken demand, provider/runtime failures, request health, and availability." },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "reliability" },
+      "name": "reliability-heading"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppRequests\n| summarize Requests=count(), Failures=countif(Success == false), p95_ms=round(percentile(DurationMs, 95), 1), Availability=round(100.0 * countif(Success == true) / count(), 2)",
+        "size": 0,
+        "title": "Request reliability summary",
+        "noDataMessage": "No request telemetry is available.",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"]
+      },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "reliability" },
+      "name": "request-reliability"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppRequests\n| summarize Requests=count(), Failures=countif(Success == false) by bin(TimeGenerated, 15m)\n| order by TimeGenerated asc",
+        "size": 0,
+        "title": "Request volume trend",
+        "noDataMessage": "No request telemetry is available.",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"],
+        "visualization": "timechart"
+      },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "reliability" },
+      "name": "request-volume-trend"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "union isfuzzy=true\n(ClinicRecallMetrics_CL | where ${metric_environment_predicate} and (MetricName contains 'token' or MetricName contains 'cost') | project TimeGenerated, Source, MetricName, MetricValue, Unit),\n(AppMetrics | where Name in ('gen_ai.usage.input_tokens', 'gen_ai.usage.output_tokens', 'gen_ai.usage.estimated_cost_usd') | extend MetricValue=Sum | project TimeGenerated, Source='runtime', MetricName=Name, MetricValue, Unit=iff(Name endswith '_tokens', 'tokens', 'USD'))\n| summarize Value=sum(MetricValue) by bin(TimeGenerated, 1h), Source, MetricName, Unit\n| order by TimeGenerated asc",
+        "size": 0,
+        "title": "Token and cost trend",
+        "noDataMessage": "No token or cost metrics are available.",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"],
+        "visualization": "timechart"
+      },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "reliability" },
+      "name": "cost-trend"
+    },
+    {
+      "type": 1,
+      "content": { "json": "## Deployment Timeline\nCommit, image, revision, model, and configuration changes against runtime health." },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "deployments" },
+      "name": "deployments-heading"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "ClinicRecallMetrics_CL\n| where ${metric_environment_predicate}\n| where isnotempty(GitSha) or isnotempty(ImageTag) or isnotempty(Revision) or isnotempty(ConfigSha)\n| summarize Metrics=dcount(MetricName), Failures=countif(Passed == false) by bin(TimeGenerated, 15m), GitSha, ImageTag, Revision, ModelVersion, ConfigSha, ProgrammeUuid, Arm\n| order by TimeGenerated desc",
+        "size": 0,
+        "title": "Release and experiment timeline",
+        "noDataMessage": "No deployment identity has been ingested.",
+        "timeContextFromParameter": "TimeRange",
+        "showExportToExcel": true,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"]
+      },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "deployments" },
+      "name": "release-timeline"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppTraces\n| extend DeploymentId=tostring(Properties['deployment.id']), ImageTag=tostring(Properties['container.image.tag']), Revision=coalesce(tostring(Properties['container.app.revision']), AppRoleInstance), ServiceVersion=coalesce(tostring(Properties['service.version']), AppVersion), ConfigHash=tostring(Properties['config.hash'])\n| where isnotempty(DeploymentId) or isnotempty(ImageTag) or isnotempty(ServiceVersion)\n| summarize FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated), TraceCount=count() by DeploymentId, ImageTag, Revision, ServiceVersion, ConfigHash\n| order by LastSeen desc",
+        "size": 0,
+        "title": "Runtime deployment identity",
+        "noDataMessage": "Runtime deployment attributes are not available yet.",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"]
+      },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "deployments" },
+      "name": "runtime-deployment-identity"
+    },
+    {
+      "type": 1,
+      "content": { "json": "## Business Outcomes\nAggregate outreach, call outcomes, rebooking, escalation, opt-out, and channel delivery. No patient-level drill-down." },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "business" },
+      "name": "business-heading"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppEvents\n| where Name in ('voice.call.outcome', 'voice.call.status', 'voice.booking.created', 'voice.escalation.triggered', 'voice.optout.recorded', 'sms.delivery.updated', 'outreach.message.sent')\n| extend Outcome=tostring(Properties['status']), Reason=tostring(Properties['reason']), Channel=tostring(Properties['channel'])\n| summarize Events=count() by Name, Outcome, Reason, Channel\n| order by Events desc",
+        "size": 0,
+        "title": "Outcome funnel",
+        "noDataMessage": "Structured aggregate business-outcome events are not available yet.",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"],
+        "visualization": "barchart"
+      },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "business" },
+      "name": "outcome-funnel"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppEvents\n| where Name in ('voice.call.outcome', 'voice.call.status', 'voice.booking.created', 'voice.escalation.triggered', 'voice.optout.recorded', 'sms.delivery.updated', 'outreach.message.sent')\n| summarize Events=count() by bin(TimeGenerated, 1d), Name\n| order by TimeGenerated asc",
+        "size": 0,
+        "title": "Business outcome trend",
+        "noDataMessage": "No structured business-outcome trend is available.",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"],
+        "visualization": "timechart"
+      },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "business" },
+      "name": "business-trend"
+    },
+    {
+      "type": 1,
+      "content": { "json": "## Pilot Operations\nAggregate pilot signal posture, snapshot freshness, queue ageing, and recent invariant breaches. All views are closed-dimension aggregates; there is no record-level drill-down." },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "pilotops" },
+      "name": "pilotops-heading"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppTraces\n| extend EventName=tostring(Properties['microsoft.custom_event.name'])\n| where EventName in ('worker.cycle.summary', 'callbacks.queue.snapshot', 'booking.confirmation.blocked', 'recording.consent.mismatch', 'rights.deletion.overdue', 'pilot.invariant.violation', 'pilot.configuration.status', 'pilot.release.mismatch', 'handoff.queue.snapshot', 'handoff.sla.breach', 'handoff.notification.outcome', 'handoff.alternate.requested', 'handoff.programme.pause')\n| summarize LastSeen=max(TimeGenerated), Events=count() by EventName\n| extend FreshnessMinutes=round(datetime_diff('second', now(), LastSeen) / 60.0, 1)\n| extend Freshness=case(FreshnessMinutes <= 15, 'FRESH', FreshnessMinutes <= 60, 'AGEING', 'STALE')\n| project EventName, LastSeen, FreshnessMinutes, Freshness, Events\n| order by EventName asc",
+        "size": 0,
+        "title": "Pilot signal posture and snapshot freshness",
+        "noDataMessage": "No pilot observability events have been ingested; signal state is UNKNOWN, not healthy.",
+        "timeContextFromParameter": "TimeRange",
+        "showRefreshButton": true,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"]
+      },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "pilotops" },
+      "name": "pilotops-signal-posture"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppTraces\n| extend EventName=tostring(Properties['microsoft.custom_event.name']), QueueState=coalesce(tostring(Properties['state']), tostring(Properties['delivery_state'])), AgeBucket=tostring(Properties['oldest_age_bucket']), AggregateCount=toint(Properties['count'])\n| where EventName in ('callbacks.queue.snapshot', 'handoff.queue.snapshot') and isnotempty(AgeBucket)\n| summarize arg_max(TimeGenerated, AggregateCount) by EventName, QueueState, AgeBucket\n| project EventName, QueueState, AgeBucket, AggregateCount\n| order by EventName asc, QueueState asc, AgeBucket asc",
+        "size": 0,
+        "title": "Queue ageing (latest snapshot per state and age band)",
+        "noDataMessage": "No queue snapshots have been ingested for this window.",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"]
+      },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "pilotops" },
+      "name": "pilotops-queue-ageing"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppTraces\n| extend EventName=tostring(Properties['microsoft.custom_event.name']), Worker=tostring(Properties['worker']), Outcome=tostring(Properties['outcome']), Reason=coalesce(tostring(Properties['reason_code']), tostring(Properties['reason'])), AggregateCount=toint(Properties['count'])\n| where (EventName in ('booking.confirmation.blocked', 'recording.consent.mismatch', 'rights.deletion.overdue', 'pilot.invariant.violation', 'pilot.release.mismatch', 'handoff.sla.breach') and AggregateCount > 0) or (EventName == 'worker.cycle.summary' and Worker in ('cliniko_dispatch', 'cliniko_reconcile') and Outcome == 'conflicts' and AggregateCount > 0) or (EventName == 'pilot.configuration.status' and Reason != 'fresh' and AggregateCount > 0)\n| summarize Breaches=sum(AggregateCount) by bin(TimeGenerated, 15m), EventName\n| order by TimeGenerated asc",
+        "size": 0,
+        "title": "Recent invariant breaches (15-minute buckets)",
+        "noDataMessage": "No invariant breaches were recorded in this window.",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"],
+        "visualization": "timechart"
+      },
+      "conditionalVisibility": { "parameterName": "selectedPage", "comparison": "isEqualTo", "value": "pilotops" },
+      "name": "pilotops-invariant-breaches"
+    }
+  ],
+  "isLocked": false,
+  "fallbackResourceIds": ["${workspace_id}"]
+}

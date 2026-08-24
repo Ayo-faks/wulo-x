@@ -1,0 +1,10 @@
+appointment_source_ref,patient_source_ref,patient_name,patient_phone,patient_email,status,start_at,value,consent_sms,consent_email,consent_call,opt_out_sms,opt_out_email,opt_out_call
+M1,P1,Amara Okafor,+447700900001,,missed,2026-06-20T09:00:00Z,65.00,yes,no,yes,no,no,no
+C1,P2,Brian Hughes,+447700900002,,cancelled,2026-06-21T10:00:00Z,80.00,yes,no,no,no,no,no
+U1,P3,Chloe Martins,+447700900003,,scheduled,2026-06-27T12:00:00Z,45.00,yes,no,yes,no,no,no
+D1,P4,Daniel Reyes,+447700900004,,scheduled,2026-07-06T12:00:00Z,120.00,yes,no,no,no,no,no
+O1,P5,Esther Bello,+447700900005,,completed,2026-05-17T12:00:00Z,55.00,yes,no,yes,no,no,no
+N1,P6,Farah Iqbal,+447700900006,,scheduled,2026-07-26T12:00:00Z,45.00,yes,no,no,no,no,no
+S1,P7,George Adeyemi,+447700900007,,missed,2026-06-20T09:00:00Z,65.00,no,no,no,no,no,no
+S2,P8,Hannah Price,+447700900008,,missed,2026-06-20T09:00:00Z,65.00,yes,no,no,yes,no,no
+S3,P9,Ibrahim Khan,,,missed,2026-06-20T09:00:00Z,65.00,yes,no,no,no,no,no

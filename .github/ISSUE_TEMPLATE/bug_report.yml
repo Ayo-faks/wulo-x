@@ -1,0 +1,45 @@
+name: Bug report
+description: Report a reproducible defect using synthetic or redacted data
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include patient data, credentials, call recordings, production identifiers, or unredacted logs. Report security issues privately through the Security tab.
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Observed behavior
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest synthetic reproduction and exact commands.
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: Revision
+      description: Commit SHA, release, or image tag.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python/Node versions, and relevant providers. Redact resource names and IDs.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Data-safety confirmation
+      options:
+        - label: I used only synthetic or fully redacted data.
+          required: true
+        - label: This report does not contain a vulnerability or secret.
+          required: true

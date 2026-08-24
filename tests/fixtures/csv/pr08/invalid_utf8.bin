@@ -1,0 +1,2 @@
+appointment_source_ref,patient_source_ref,patient_name,status,start_at
+APPT-PR08-G03,PAT-PR08-G03,Test Patient ÿþ Bad,missed,2026-06-20T09:00:00+00:00

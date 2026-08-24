@@ -1,0 +1,7 @@
+appointment_source_ref,patient_source_ref,patient_name,patient_phone,patient_email,status,start_at,value,consent_sms,consent_email,consent_call,opt_out_sms,opt_out_email,opt_out_call
+APPT-PR08-A01,PAT-PR08-A01,Test Patient Tau,not-a-phone,tau@clinic-test.invalid,missed,2026-06-20T09:00:00+00:00,,no,no,no,no,no,no
+APPT-PR08-A02,PAT-PR08-A02,Test Patient Upsilon,+447700900401,not-an-email,missed,2026-06-20T09:00:00+00:00,,no,no,no,no,no,no
+APPT-PR08-A03,PAT-PR08-A03,Test Patient Phi,,,unknown_status,2026-06-20T09:00:00+00:00,,no,no,no,no,no,no
+APPT-PR08-A04,PAT-PR08-A04,Test Patient Chi,,,missed,2026-06-20T09:00:00+00:00,not-a-decimal,no,no,no,no,no,no
+APPT-PR08-A05,PAT-PR08-A05,Test Patient Psi,,,missed,2026-06-20T09:00:00+00:00,,maybe,no,no,no,no,no
+APPT-PR08-A06,PAT-PR08-A06,Test Patient Omega,,,missed,not-a-timestamp,,no,no,no,no,no,no

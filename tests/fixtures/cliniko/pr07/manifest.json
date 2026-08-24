@@ -1,0 +1,31 @@
+{
+  "fixture_kind": "hand_authored_synthetic",
+  "evidence_authority": "synthetic_contract_verified",
+  "contains_provider_data": false,
+  "contains_real_patient_data": false,
+  "contains_patient_contact_data": false,
+  "contains_clinical_content": false,
+  "observation_clock": "2026-07-25T12:00:00Z",
+  "openapi_source": "https://docs.api.cliniko.com/_bundle/openapi.json?download",
+  "provider_schema_sha256": "47ff9d59e97d8049f13c3a89ce2f4d1b6acf9f7c49a44c324301108074a86b7b",
+  "automated_operations": [
+    "POST /individual_appointments",
+    "GET /individual_appointments",
+    "GET /individual_appointments/{id}"
+  ],
+  "disabled_operations": [
+    "PATCH /individual_appointments/{id}"
+  ],
+  "files": [
+    "create_request.json",
+    "create_response.json",
+    "reschedule_request.json",
+    "reschedule_response.json",
+    "reconciliation_zero.json",
+    "reconciliation_one.json",
+    "reconciliation_multiple.json",
+    "read_back_variants.json",
+    "error_cases.json",
+    "malformed_cases.json"
+  ]
+}

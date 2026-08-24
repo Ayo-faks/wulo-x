@@ -1,0 +1,19 @@
+{
+  "validation": {
+    "status": 422,
+    "body": {
+      "message": "Validation Failed",
+      "errors": {"starts_at": "synthetic invalid value"}
+    }
+  },
+  "authentication": {"status": 401, "body": {}},
+  "permission": {"status": 403, "body": {}},
+  "not_found": {"status": 404, "body": {}},
+  "conflict": {"status": 409, "body": {}},
+  "rate_limited": {
+    "status": 429,
+    "headers": {"X-RateLimit-Reset": "1784981100"},
+    "body": {}
+  },
+  "server_error": {"status": 503, "body": {}}
+}

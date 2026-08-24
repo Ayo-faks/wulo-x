@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en-GB">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/robot-svgrepo-com.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0e0e10" />
+
+    <!-- Primary SEO -->
+    <title>Wulo-X — AI Appointment Recovery &amp; Patient Recall for Clinics</title>
+    <meta
+      name="description"
+      content="Wulo-X recovers missed and overdue appointments for dental and healthcare clinics. SMS-first outreach with a governed AI voice agent that books real diary slots and hands anything clinical straight to your staff. UK GDPR aligned, per-clinic data isolation."
+    />
+    <meta
+      name="keywords"
+      content="AI appointment recovery, patient recall software, missed appointment follow-up, dental recall system, clinic no-show recovery, AI voice agent healthcare, appointment rebooking automation, waitlist fill, UK clinic software"
+    />
+    <meta name="robots" content="index, follow" />
+    <meta name="author" content="Wulo" />
+
+    <!-- Open Graph -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Wulo-X" />
+    <meta property="og:title" content="Wulo-X — AI Appointment Recovery &amp; Patient Recall for Clinics" />
+    <meta
+      property="og:description"
+      content="Recover missed appointments without adding front-desk work. SMS first, governed AI voice fallback, real bookings only — anything clinical goes to your team."
+    />
+    <meta property="og:image" content="/phoneimage.png" />
+    <meta property="og:locale" content="en_GB" />
+
+    <!-- Twitter -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Wulo-X — AI Appointment Recovery for Clinics" />
+    <meta
+      name="twitter:description"
+      content="Contacts overdue patients instantly. SMS first, governed AI voice fallback. Books real slots into your diary — and escalates anything clinical to your staff."
+    />
+    <meta name="twitter:image" content="/phoneimage.png" />
+
+    <!-- Structured data: product + AEO answers -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@graph": [
+        {
+          "@type": "SoftwareApplication",
+          "name": "Wulo-X",
+          "applicationCategory": "BusinessApplication",
+          "operatingSystem": "Web",
+          "description": "AI appointment recovery and patient recall for clinics: detects overdue and missed appointments, contacts patients by SMS first with a governed AI voice-call fallback, books real diary slots, and escalates anything clinical, urgent, or unclear to clinic staff.",
+          "publisher": { "@type": "Organization", "name": "Wulo-X", "url": "https://github.com/Ayo-faks/wulo-x" },
+          "featureList": [
+            "Recall and reactivation of overdue patients",
+            "Same-day no-show recovery via SMS and AI voice",
+            "Waitlist fill with tool-verified real slots",
+            "Fail-closed clinical safety: medical questions always route to humans",
+            "Per-clinic data isolation enforced with row-level security",
+            "Safety evaluations, red-teaming and release gates on every agent version"
+          ]
+        },
+        {
+          "@type": "FAQPage",
+          "mainEntity": [
+            {
+              "@type": "Question",
+              "name": "What is Wulo-X?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Wulo-X is an AI appointment-recovery product for clinics. It finds patients with missed or overdue appointments, contacts them by SMS first with a governed AI voice-call fallback, and rebooks them into real diary slots — while routing anything clinical or urgent to clinic staff."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Does the Wulo-X AI agent give medical advice?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "No. Wulo-X is limited to appointment logistics. Clinical, urgent, or unclear requests always stop automation and escalate to clinic staff — a fail-closed safety design."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "How does Wulo-X recover missed appointments?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Deterministic rules detect patients needing follow-up, safe SMS outreach goes out first, and a governed AI voice agent follows up when needed. Bookings are made only into verified real slots and confirmed by code, never claimed by the AI."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Is Wulo-X safe to use with patient data?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Wulo-X keeps every clinic's data separate with database-enforced row-level security, aligns with UK GDPR including consent and erasure controls, and every agent version must pass hosted safety evaluations, red-teaming and release gates before deployment."
+              }
+            }
+          ]
+        }
+      ]
+    }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

@@ -1,0 +1,229 @@
+# AgentOps - Scheduled safety + drift monitor (DEV)
+#
+# agentops:deploy-mode=prompt-agent
+#
+# Manually dispatched prompt-agent governance checks. The workflow uses uv, a pinned
+# agentops-accelerator[foundry,agent]==0.5.2, pinned azd ai agents extension, the
+# Azure OIDC + azd dual-login, governance-gate auto-detection, and AZURE_AD_TOKEN
+# for ASSERT. Runs nightly against the deployed DEV agent:
+#   - Red Team (adversarial safety) and ASSERT (policy safety) -> hard gates;
+#   - Doctor evidence pack -> advisory drift/telemetry report.
+# Opens a GitHub issue if a safety gate regresses.
+
+name: AgentOps Scheduled (safety + drift)
+
+on:
+  workflow_dispatch:
+    inputs:
+      config:
+        description: "Path to agentops.yaml"
+        required: false
+        default: "agentops.yaml"
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write # open an issue when a safety gate regresses
+
+concurrency:
+  group: agentops-scheduled-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    name: Red Team + ASSERT + Doctor (DEV)
+    runs-on: ubuntu-latest
+    environment: dev
+    timeout-minutes: 60
+    env:
+      AGENTOPS_CONFIG: ${{ inputs.config || 'agentops.yaml' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: false
+
+      - name: Install AgentOps Toolkit
+        run: |
+          uv pip install --system "agentops-accelerator[foundry,agent]==0.5.2"
+
+      - name: Set up Azure Developer CLI
+        uses: Azure/setup-azd@v2
+
+      - name: Install pinned azd AI agents extension
+        env:
+          AGENTOPS_AZD_AI_AGENTS_EXTENSION_VERSION: "0.1.41-preview"
+        run: |
+          azd extension install azure.ai.agents --version "$AGENTOPS_AZD_AI_AGENTS_EXTENSION_VERSION"
+
+      # Dual-login: az CLI (azure/login) + azd's own credential store.
+      - name: azd login (OIDC)
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        run: |
+          azd auth login \
+            --client-id "$AZURE_CLIENT_ID" \
+            --federated-credential-provider "github" \
+            --tenant-id "$AZURE_TENANT_ID"
+
+      - name: Hydrate azd environment (dev)
+        env:
+          AZURE_ENV_NAME: "dev"
+          AZURE_AI_FOUNDRY_PROJECT_ENDPOINT: ${{ vars.AZURE_AI_FOUNDRY_PROJECT_ENDPOINT }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+          azd env select "$AZURE_ENV_NAME" 2>/dev/null || azd env new "$AZURE_ENV_NAME" --no-prompt
+          azd env set FOUNDRY_PROJECT_ENDPOINT "$AZURE_AI_FOUNDRY_PROJECT_ENDPOINT"
+          azd env set AZURE_AI_FOUNDRY_PROJECT_ENDPOINT "$AZURE_AI_FOUNDRY_PROJECT_ENDPOINT"
+          azd env set AZURE_SUBSCRIPTION_ID "$AZURE_SUBSCRIPTION_ID"
+
+      - name: Detect AgentOps governance gates
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from agentops.utils.yaml import load_yaml
+
+          config = Path(os.environ["AGENTOPS_CONFIG"])
+          data = load_yaml(config) if config.exists() else {}
+          has_assert = isinstance(data, dict) and "assert" in data
+          has_redteam = isinstance(data, dict) and "redteam" in data
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as env_file:
+              env_file.write(f"AGENTOPS_HAS_ASSERT={str(has_assert).lower()}\n")
+              env_file.write(f"AGENTOPS_HAS_REDTEAM={str(has_redteam).lower()}\n")
+          print(f"ASSERT gate: {has_assert}")
+          print(f"Red Team gate: {has_redteam}")
+          PY
+
+      - name: Install AgentOps governance dependencies (pinned)
+        if: env.AGENTOPS_HAS_ASSERT == 'true' || env.AGENTOPS_HAS_REDTEAM == 'true'
+        run: |
+          # Pinned, single-source gate runners (devops/agentops/requirements-gate.txt),
+          # installed out-of-process so they never co-resolve with the ART app env.
+          uv pip install --system -r devops/agentops/requirements-gate.txt
+
+      # Adversarial safety. Attacks the model deployment from agentops.yaml redteam.target;
+      # no PR candidate needed. Exits non-zero if attack-success-rate exceeds the threshold.
+      - name: Red Team gate
+        if: env.AGENTOPS_HAS_REDTEAM == 'true'
+        env:
+          AZURE_AI_FOUNDRY_PROJECT_ENDPOINT: ${{ vars.AZURE_AI_FOUNDRY_PROJECT_ENDPOINT }}
+          AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
+          AZURE_OPENAI_DEPLOYMENT: ${{ vars.AZURE_OPENAI_DEPLOYMENT }}
+          AZURE_OPENAI_MODEL_NAME: ${{ vars.AZURE_OPENAI_MODEL_NAME }}
+          APPLICATIONINSIGHTS_CONNECTION_STRING: ${{ secrets.APPLICATIONINSIGHTS_CONNECTION_STRING || vars.APPLICATIONINSIGHTS_CONNECTION_STRING }}
+        run: |
+          agentops redteam run --config "$AGENTOPS_CONFIG"
+
+      # Policy safety. assert.fail_on_violations: true in agentops.yaml means a breach
+      # exits non-zero and fails the nightly run.
+      - name: ASSERT gate
+        if: env.AGENTOPS_HAS_ASSERT == 'true'
+        env:
+          AZURE_API_BASE: ${{ vars.AZURE_API_BASE }}
+          AZURE_API_VERSION: ${{ vars.AZURE_API_VERSION }}
+        run: |
+          set -euo pipefail
+          export AZURE_AD_TOKEN="$(az account get-access-token --resource https://cognitiveservices.azure.com/ --query accessToken -o tsv)"
+          agentops assert run --config "$AGENTOPS_CONFIG"
+
+      # Advisory: drift + telemetry. No --severity-fail so nightly telemetry criticals
+      # (e.g. latency.p95) surface in the report without failing the safety monitor.
+      - name: Doctor evidence pack (advisory)
+        if: always()
+        env:
+          AZURE_AI_FOUNDRY_PROJECT_ENDPOINT: ${{ vars.AZURE_AI_FOUNDRY_PROJECT_ENDPOINT }}
+          AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
+          AZURE_OPENAI_DEPLOYMENT: ${{ vars.AZURE_OPENAI_DEPLOYMENT }}
+          APPLICATIONINSIGHTS_CONNECTION_STRING: ${{ secrets.APPLICATIONINSIGHTS_CONNECTION_STRING || vars.APPLICATIONINSIGHTS_CONNECTION_STRING }}
+        run: |
+          agentops doctor --workspace . --out .agentops/agent/report.md --evidence-pack || true
+
+      - name: Publish aggregate metrics to Azure Monitor
+        if: ${{ always() && vars.AZURE_MONITOR_INGESTION_ENDPOINT != '' && vars.AZURE_MONITOR_DCR_RULE_ID != '' }}
+        env:
+          AZURE_MONITOR_INGESTION_ENDPOINT: ${{ vars.AZURE_MONITOR_INGESTION_ENDPOINT }}
+          AZURE_MONITOR_DCR_RULE_ID: ${{ vars.AZURE_MONITOR_DCR_RULE_ID }}
+          AZURE_MONITOR_STREAM_NAME: ${{ vars.AZURE_MONITOR_STREAM_NAME || 'Custom-ClinicRecallMetrics' }}
+        run: |
+          set -euo pipefail
+          uv pip install --system "azure-identity>=1.15,<2" "azure-monitor-ingestion==1.0.0"
+          args=(
+            --environment dev
+            --suite recall
+            --workflow-name "$GITHUB_WORKFLOW"
+            --workflow-run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            --git-sha "$GITHUB_SHA"
+            --jsonl-out .agentops/results/monitor-metric-rows.jsonl
+          )
+          has_input=false
+          if [[ -f .agentops/assert/latest.json ]]; then
+            args+=(--assert-result .agentops/assert/latest.json)
+            has_input=true
+          fi
+          if [[ -f .agentops/redteam/latest.json ]]; then
+            args+=(--red-team-result .agentops/redteam/latest.json)
+            has_input=true
+          fi
+          if [[ -f .agentops/release/latest/evidence.json ]]; then
+            args+=(--doctor-result .agentops/release/latest/evidence.json)
+            has_input=true
+          fi
+          if [[ "$has_input" != "true" ]]; then
+            echo "No aggregate evidence files were produced; skipping metric publication."
+            exit 0
+          fi
+          python devops/agentops/emit_metric_rows.py "${args[@]}"
+
+      - name: Upload monitor results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: agentops-scheduled-results
+          path: |
+            .agentops/assert/latest.json
+            .agentops/redteam/latest.json
+            .agentops/redteam/raw_summary.json
+            .agentops/agent/report.md
+            .agentops/results/monitor-metric-rows.jsonl
+            .agentops/release/latest/evidence.json
+            .agentops/release/latest/evidence.md
+          if-no-files-found: warn
+
+      - name: Step summary
+        if: always()
+        run: |
+          {
+            echo "## AgentOps Scheduled Safety Monitor (DEV)"
+            echo
+            if [ -f .agentops/agent/report.md ]; then
+              cat .agentops/agent/report.md
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open issue on safety regression
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --title "AgentOps nightly safety gate failed ($(date -u +%Y-%m-%d))" \
+            --body "A scheduled Red Team or ASSERT gate regressed for the DEV Recall Agent. See run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --label "safety,agentops" || echo "issue creation skipped (labels or permissions)"

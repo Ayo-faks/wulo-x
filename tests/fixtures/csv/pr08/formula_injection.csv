@@ -1,0 +1,7 @@
+appointment_source_ref,patient_source_ref,patient_name,status,start_at
+=CMD1,PAT-PR08-701,Test Patient Lambda,missed,2026-06-20T09:00:00+00:00
+APPT-PR08-702,+PAT-702,Test Patient Mu,missed,2026-06-20T09:00:00+00:00
+APPT-PR08-703,-PAT-703,Test Patient Nu,missed,2026-06-20T09:00:00+00:00
+APPT-PR08-704,@PAT-704,Test Patient Xi,missed,2026-06-20T09:00:00+00:00
+APPT-PR08-705, =PAT-705,Test Patient Omicron,missed,2026-06-20T09:00:00+00:00
+APPT-PR08-706,＝PAT-706,Test Patient Pi,missed,2026-06-20T09:00:00+00:00

@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/microsoft/AgentSchema/refs/heads/main/schemas/v1.0/ContainerAgent.yaml
+
+kind: hosted
+name: recall-agent
+description: Outbound appointment-recovery agent for private clinics. Appointment logistics only; never gives medical advice.
+protocols:
+  - protocol: responses
+    version: 2.0.0
+resources:
+  cpu: "0.25"
+  memory: 0.5Gi
+environment_variables:
+  - name: AZURE_AI_MODEL_DEPLOYMENT_NAME
+    value: gpt-4o-mini
+metadata:
+  prompt_file: ../../.agentops/prompts/recall-agent.prompt.md
+  safety_boundary: clinical-escalation-only

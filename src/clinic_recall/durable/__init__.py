@@ -1,0 +1,1 @@
+"""Durable, fail-closed execution primitives for Clinic Recall."""

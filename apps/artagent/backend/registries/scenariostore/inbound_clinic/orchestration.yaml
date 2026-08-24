@@ -1,0 +1,36 @@
+name: inbound_clinic
+description: Provider-switchable inbound clinic phone assistant
+icon: "IC"
+
+start_agent: InboundClinicAgent
+
+agents:
+  - InboundClinicAgent
+  - RecallAgent
+
+handoff_type: discrete
+
+generic_handoff:
+  enabled: false
+  default_type: discrete
+  share_context: true
+  require_client_id: false
+
+agent_defaults:
+  industry: "clinic-recall"
+  compliance_required: true
+  scenario_goal: |
+    Run the inbound clinic front-desk scenario only: greet the caller, identify the
+    high-level non-clinical intent, answer safe clinic logistics, create staff tasks
+    for callback requests, and fail closed to staff for appointment, identity, clinical, urgent,
+    complaint, safeguarding, distress, or unclear calls. Never give medical advice,
+    never read back gated patient information, and never invent slots, prices,
+    clinicians, or bookings.
+
+tools:
+  - get_clinic_hours
+  - get_clinic_services
+  - request_callback
+  - record_inbound_opt_out
+  - escalate_inbound_to_staff
+  - log_inbound_call_outcome

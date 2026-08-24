@@ -1,0 +1,70 @@
+{
+  "individual_appointments": [
+    {
+      "id": "910000001",
+      "patient": {
+        "links": {
+          "self": "https://api.uk2.cliniko.com/v1/patients/900000001"
+        }
+      },
+      "starts_at": "2026-08-01T09:00:00Z",
+      "ends_at": "2026-08-01T09:30:00Z",
+      "cancelled_at": null,
+      "did_not_arrive": false,
+      "patient_arrived": false,
+      "archived_at": null,
+      "updated_at": "2026-07-21T09:00:00Z",
+      "extra_provider_field": "SYNTH DISCARD"
+    },
+    {
+      "id": "910000002",
+      "patient": {
+        "links": {
+          "self": "https://api.uk2.cliniko.com/v1/patients/900000001"
+        }
+      },
+      "starts_at": "2026-07-01T09:00:00Z",
+      "ends_at": "2026-07-01T09:30:00Z",
+      "cancelled_at": null,
+      "did_not_arrive": true,
+      "patient_arrived": false,
+      "archived_at": null,
+      "updated_at": "2026-07-02T09:00:00Z",
+      "extra_provider_field": "SYNTH DISCARD"
+    },
+    {
+      "id": "910000003",
+      "patient": {
+        "links": {
+          "self": "https://api.uk2.cliniko.com/v1/patients/900000002"
+        }
+      },
+      "starts_at": "2026-07-02T09:00:00Z",
+      "ends_at": "2026-07-02T09:30:00Z",
+      "cancelled_at": "2026-07-22T09:00:00Z",
+      "did_not_arrive": true,
+      "patient_arrived": true,
+      "archived_at": "2026-07-23T09:00:00Z",
+      "updated_at": "2026-07-23T09:00:00Z",
+      "extra_provider_field": "SYNTH DISCARD"
+    },
+    {
+      "id": "910000004",
+      "patient": {
+        "links": {
+          "self": "https://api.uk2.cliniko.com/v1/patients/900000001"
+        }
+      },
+      "starts_at": "2026-07-03T09:00:00Z",
+      "ends_at": "2026-07-03T09:30:00Z",
+      "cancelled_at": null,
+      "did_not_arrive": false,
+      "patient_arrived": true,
+      "archived_at": null,
+      "updated_at": "2026-07-03T10:00:00Z",
+      "extra_provider_field": "SYNTH DISCARD"
+    }
+  ],
+  "total_entries": 4,
+  "links": {}
+}

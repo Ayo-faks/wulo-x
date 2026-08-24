@@ -1,0 +1,27 @@
+{
+  "fixture_kind": "hand_authored_synthetic",
+  "evidence_authority": "synthetic_contract_verified",
+  "contains_provider_data": false,
+  "contains_real_patient_data": false,
+  "contains_patient_contact_data": false,
+  "observation_clock": "2026-07-24T12:00:00Z",
+  "freshness_seconds": 600,
+  "bindings": [
+    {
+      "clinic_id": "clinic-pr06-synthetic",
+      "business_id": "920600001",
+      "practitioner_id": "930600001",
+      "appointment_type_id": "940600001",
+      "duration_minutes": 30
+    },
+    {
+      "clinic_id": "clinic-pr06-synthetic",
+      "business_id": "920600002",
+      "practitioner_id": "930600002",
+      "appointment_type_id": "940600002",
+      "duration_minutes": 45
+    }
+  ],
+  "schema_source": "https://docs.api.cliniko.com/openapi/available-time",
+  "schema_checked_at": "2026-07-24T00:00:00Z"
+}

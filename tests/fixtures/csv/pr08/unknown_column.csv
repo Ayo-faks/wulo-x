@@ -1,0 +1,2 @@
+appointment_source_ref,patient_source_ref,patient_name,status,start_at,internal_notes
+APPT-PR08-501,PAT-PR08-501,Test Patient Iota,missed,2026-06-20T09:00:00+00:00,should not be accepted

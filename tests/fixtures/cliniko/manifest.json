@@ -1,0 +1,7 @@
+{
+  "fixture_kind": "hand_authored_synthetic",
+  "contains_provider_data": false,
+  "contains_real_patient_data": false,
+  "schema_source": "https://docs.api.cliniko.com/_bundle/openapi.json?download",
+  "schema_checked_at": "2026-07-24T00:00:00Z"
+}

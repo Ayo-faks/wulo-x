@@ -1,0 +1,11 @@
+{
+  "available_times": [
+    {
+      "appointment_start": "2026-08-01T09:00:00Z"
+    }
+  ],
+  "total_entries": 1,
+  "links": {
+    "self": "https://api.uk2.cliniko.com/v1/businesses/920600002/practitioners/930600002/appointment_types/940600002/available_times?from=2026-08-01&to=2026-08-02&page=1&per_page=1"
+  }
+}

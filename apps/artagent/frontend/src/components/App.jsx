@@ -1,0 +1,6467 @@
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import {
+  Box,
+  Button,
+  Divider,
+  IconButton,
+  LinearProgress,
+  Typography,
+} from '@mui/material';
+import SendRoundedIcon from '@mui/icons-material/SendRounded';
+import BoltRoundedIcon from '@mui/icons-material/BoltRounded';
+import SpeedRoundedIcon from '@mui/icons-material/SpeedRounded';
+import BuildRoundedIcon from '@mui/icons-material/BuildRounded';
+import TuneRoundedIcon from '@mui/icons-material/TuneRounded';
+import TemporaryUserForm from './TemporaryUserForm';
+import { AcsStreamingModeSelector, RealtimeStreamingModeSelector } from './StreamingModeSelector.jsx';
+import ProfileButton from './ProfileButton.jsx';
+import ProfileDetailsPanel from './ProfileDetailsPanel.jsx';
+import BackendIndicator from './BackendIndicator.jsx';
+import HelpButton from './HelpButton.jsx';
+import IndustryTag from './IndustryTag.jsx';
+import SessionSelector from './SessionSelector.jsx';
+import WaveformVisualization from './WaveformVisualization.jsx';
+import ConversationControls from './ConversationControls.jsx';
+import ChatBubble from './ChatBubble.jsx';
+import GraphCanvas from './graph/GraphCanvas.jsx';
+import GraphListView from './graph/GraphListView.jsx';
+import AgentTopologyPanel from './AgentTopologyPanel.jsx';
+import SessionPerformancePanel from './SessionPerformancePanel.jsx';
+import AgentBuilder from './AgentBuilder.jsx';
+import AgentScenarioBuilder from './AgentScenarioBuilder.jsx';
+import useBargeIn from '../hooks/useBargeIn.js';
+import { API_BASE_URL, WS_URL } from '../config/constants.js';
+import { ensureVoiceAppKeyframes, styles } from '../styles/voiceAppStyles.js';
+import {
+  buildSystemMessage,
+  describeEventData,
+  formatEventTypeLabel,
+  formatStatusTimestamp,
+  inferStatusTone,
+  formatAgentInventory,
+} from '../utils/formatters.js';
+import {
+  buildSessionProfile,
+  createMetricsState,
+  createNewSessionId,
+  getOrCreateSessionId,
+  setSessionId as persistSessionId,
+  toMs,
+} from '../utils/session.js';
+import logger from '../utils/logger.js';
+import { fetchFoundryModels, deriveModelOptions, MANAGED_VOICELIVE_MODELS } from '../utils/foundryModels.js';
+import { OrchestrationDiagramModal } from './OrchestrationDiagram.jsx';
+
+const STREAM_MODE_STORAGE_KEY = 'artagent.streamingMode';
+const STREAM_MODE_FALLBACK = 'voice_live';
+const REALTIME_STREAM_MODE_STORAGE_KEY = 'artagent.realtimeStreamingMode';
+const REALTIME_STREAM_MODE_FALLBACK = 'realtime';
+
+// Cascade model presets for the Quick Tune popover (fallback when the live
+// deployment list is unavailable). VoiceLive uses MANAGED_VOICELIVE_MODELS
+// (managed) or the live deployments (BYOM) instead.
+const CASCADE_MODEL_PRESETS = [
+  'gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4',
+  'gpt-5', 'gpt-5-mini', 'gpt-5-nano', 'o3-mini', 'o3', 'o1',
+];
+// Voice Live BYOM (Bring Your Own Model) profile modes (VoiceLive only). Empty =
+// managed VoiceLive (no profile sent). Mirrors the full Agent Builder.
+const BYOM_MODE_OPTIONS = [
+  { value: '', label: 'Off — managed VoiceLive' },
+  { value: 'byom-azure-openai-realtime', label: 'Azure OpenAI Realtime' },
+  { value: 'byom-azure-openai-chat-completion', label: 'Azure OpenAI / Foundry Chat Completion' },
+  { value: 'byom-foundry-anthropic-messages', label: 'Foundry Anthropic Messages (preview)' },
+];
+// Input transcription models for VoiceLive (mirrors the full Agent Builder).
+const TRANSCRIPTION_MODEL_PRESETS = [
+  { value: 'azure-speech', label: 'Azure Speech' },
+  { value: 'mai-transcribe-1.5', label: 'MAI-Transcribe 1.5' },
+  { value: 'gpt-4o-transcribe', label: 'GPT-4o Transcribe' },
+  { value: 'whisper-1', label: 'Whisper-1' },
+];
+// VoiceLive arch: 'realtime' models are native speech-to-speech; everything else
+// runs cascaded STT→LLM→TTS inside VoiceLive.
+const classifyVoiceLiveArch = (id) =>
+  (id || '').toLowerCase().includes('realtime') ? 'native' : 'cascaded';
+
+// Parse a voice rate/pitch string like "-4%" / "+10%" into a signed number.
+const parsePercent = (val) => {
+  if (typeof val === 'number') return val;
+  if (!val) return 0;
+  const m = String(val).match(/-?\d+(\.\d+)?/);
+  return m ? Number(m[0]) : 0;
+};
+const toPercent = (n) => `${n >= 0 ? '+' : ''}${Math.round(n)}%`;
+const PANEL_MARGIN = 16;
+// Avoid noisy logging in hot-path streaming handlers unless explicitly enabled
+const ENABLE_VERBOSE_STREAM_LOGS = false;
+
+// Infer template id from config path (e.g., /agents/concierge/agent.yaml -> concierge)
+const deriveTemplateId = (configPath) => {
+  if (!configPath || typeof configPath !== 'string') return null;
+  const parts = configPath.split(/[/\\]/).filter(Boolean);
+  const agentIdx = parts.lastIndexOf('agents');
+  if (agentIdx >= 0 && parts[agentIdx + 1]) return parts[agentIdx + 1];
+  return parts.length >= 2 ? parts[parts.length - 2] : null;
+};
+
+const TextInputBar = React.memo(function TextInputBar({ onSend }) {
+  const [value, setValue] = useState("");
+  const hasText = value.trim().length > 0;
+
+  const handleChange = useCallback((event) => {
+    setValue(event.target.value);
+  }, []);
+
+  const handleSend = useCallback(() => {
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    const sent = onSend(trimmed);
+    if (sent !== false) {
+      setValue("");
+    }
+  }, [onSend, value]);
+
+  const handleKeyDown = useCallback(
+    (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        handleSend();
+      }
+    },
+    [handleSend],
+  );
+
+  const sendButtonSx = useMemo(
+    () => ({
+      width: "48px",
+      height: "48px",
+      minWidth: "48px",
+      borderRadius: "50%",
+      padding: 0,
+      background: hasText
+        ? "linear-gradient(135deg, var(--vsc-success), var(--vsc-success))"
+        : "linear-gradient(135deg, var(--vsc-input-bg), var(--vsc-border))",
+      color: hasText ? "white" : "var(--vsc-fg)",
+      border: hasText ? "none" : "1px solid var(--vsc-border)",
+      boxShadow: hasText
+        ? "0 4px 14px rgba(16,185,129,0.3), inset 0 1px 2px rgba(255,255,255,0.2)"
+        : "0 2px 6px rgba(0,0,0,0.06)",
+      transition: "all 0.25s cubic-bezier(0.4, 0, 0.2, 1)",
+      cursor: hasText ? "pointer" : "not-allowed",
+      '&:hover': hasText
+        ? {
+            background: "linear-gradient(135deg, var(--vsc-success), var(--vsc-success))",
+            transform: "scale(1.08) translateY(-1px)",
+            boxShadow:
+              "0 8px 20px rgba(16,185,129,0.4), 0 0 0 3px rgba(16,185,129,0.15), inset 0 1px 2px rgba(255,255,255,0.2)",
+          }
+        : {},
+      '&:active': hasText
+        ? {
+            transform: "scale(1.02) translateY(0px)",
+            boxShadow: "0 2px 8px rgba(16,185,129,0.3)",
+          }
+        : {},
+      '& svg': {
+        fontSize: '20px',
+        transform: 'translateX(1px)',
+      },
+    }),
+    [hasText],
+  );
+
+  return (
+    <div style={styles.textInputContainer}>
+      <input
+        type="text"
+        value={value}
+        onChange={handleChange}
+        onKeyDown={handleKeyDown}
+        placeholder="Type your message here..."
+        style={styles.textInput}
+      />
+      <IconButton
+        onClick={handleSend}
+        disabled={!hasText}
+        disableRipple
+        sx={sendButtonSx}
+      >
+        <SendRoundedIcon />
+      </IconButton>
+    </div>
+  );
+});
+
+// Component styles
+
+
+
+
+
+
+
+
+
+
+
+
+
+// Main voice application component
+function RealTimeVoiceApp() {
+
+  useEffect(() => {
+    ensureVoiceAppKeyframes();
+  }, []);
+
+  // Component state
+  const [messages, setMessages] = useState([]);
+  // Keep logs off React state to avoid re-renders on every envelope/audio frame.
+  const logBufferRef = useRef("");
+  const [recording, setRecording] = useState(false);
+  const [micMuted, setMicMuted] = useState(false);
+  const [targetPhoneNumber, setTargetPhoneNumber] = useState("");
+  const [callActive, setCallActive] = useState(false);
+  const [activeSpeaker, setActiveSpeaker] = useState(null);
+  const [showPhoneInput, setShowPhoneInput] = useState(false);
+  const [showRealtimeModePanel, setShowRealtimeModePanel] = useState(false);
+  const [pendingRealtimeStart, setPendingRealtimeStart] = useState(false);
+  const [agentInventory, setAgentInventory] = useState(null);
+  const [agentDetail, setAgentDetail] = useState(null);
+  const [sessionAgentConfig, setSessionAgentConfig] = useState(null);
+  const [sessionScenarioConfig, setSessionScenarioConfig] = useState(null);
+  const sessionScenarioConfigRef = useRef(sessionScenarioConfig);
+  useEffect(() => {
+    sessionScenarioConfigRef.current = sessionScenarioConfig;
+  }, [sessionScenarioConfig]);
+  // Version counter to protect optimistic updates from stale fetches.
+  // Incremented on every optimistic update; fetchSessionScenarioConfig only
+  // applies the server response when the version hasn't changed since the
+  // fetch started (i.e., no optimistic update is in-flight).
+  const scenarioVersionRef = useRef(0);
+  const [showAgentsPanel, setShowAgentsPanel] = useState(false);
+  const [selectedAgentName, setSelectedAgentName] = useState(null);
+  const [realtimePanelCoords, setRealtimePanelCoords] = useState({ top: 0, left: 0 });
+  const [chatWidth, setChatWidth] = useState(1040);
+  const [isResizingChat, setIsResizingChat] = useState(false);
+  const chatWidthRef = useRef(chatWidth);
+  const resizeStartXRef = useRef(0);
+  const mainShellRef = useRef(null);
+  const [systemStatus, setSystemStatus] = useState({
+    status: "checking",
+    acsOnlyIssue: false,
+  });
+  const streamingModeOptions = AcsStreamingModeSelector.options ?? [];
+  const realtimeStreamingModeOptions = RealtimeStreamingModeSelector.options ?? [];
+  const allowedStreamModes = streamingModeOptions.map((option) => option.value);
+  const fallbackStreamMode = allowedStreamModes.includes(STREAM_MODE_FALLBACK)
+    ? STREAM_MODE_FALLBACK
+    : allowedStreamModes[0] || STREAM_MODE_FALLBACK;
+  const allowedRealtimeStreamModes = realtimeStreamingModeOptions.map((option) => option.value);
+  const fallbackRealtimeStreamMode = allowedRealtimeStreamModes.includes(
+    REALTIME_STREAM_MODE_FALLBACK,
+  )
+    ? REALTIME_STREAM_MODE_FALLBACK
+    : allowedRealtimeStreamModes[0] || REALTIME_STREAM_MODE_FALLBACK;
+  const [selectedStreamingMode, setSelectedStreamingMode] = useState(() => {
+    const allowed = new Set(allowedStreamModes);
+    if (typeof window !== 'undefined') {
+      try {
+        const stored = window.localStorage.getItem(STREAM_MODE_STORAGE_KEY);
+        if (stored && allowed.has(stored)) {
+          return stored;
+        }
+      } catch (err) {
+        logger.warn('Failed to read stored streaming mode preference', err);
+      }
+    }
+    const envMode = (import.meta.env.VITE_ACS_STREAMING_MODE || '').toLowerCase();
+    if (envMode && allowed.has(envMode)) {
+      return envMode;
+    }
+    return fallbackStreamMode;
+  });
+  const [selectedRealtimeStreamingMode, setSelectedRealtimeStreamingMode] = useState(() => {
+    const allowed = new Set(allowedRealtimeStreamModes);
+    if (typeof window !== 'undefined') {
+      try {
+        const stored = window.localStorage.getItem(REALTIME_STREAM_MODE_STORAGE_KEY);
+        if (stored && allowed.has(stored)) {
+          return stored;
+        }
+      } catch (err) {
+        logger.warn('Failed to read stored realtime streaming mode preference', err);
+      }
+    }
+    const envMode = (import.meta.env.VITE_REALTIME_STREAMING_MODE || '').toLowerCase();
+    if (envMode && allowed.has(envMode)) {
+      return envMode;
+    }
+    return fallbackRealtimeStreamMode;
+  });
+  const [sessionProfiles, setSessionProfiles] = useState({});
+  const [sessionCoreMemory, setSessionCoreMemory] = useState(null);
+  const [sessionMetadata, setSessionMetadata] = useState(null);
+  const [sessionMetrics, setSessionMetrics] = useState(null);
+  // Session ID must be declared before scenario helpers that use it
+  const [sessionId, setSessionId] = useState(() => getOrCreateSessionId());
+
+  // Scenario selection state
+  const [showScenarioMenu, setShowScenarioMenu] = useState(false);
+  // Non-null while a scenario switch is in-flight (POST + confirmation fetch).
+  // The menu and button are disabled while this is set to prevent double-clicks.
+  const [scenarioSwitching, setScenarioSwitching] = useState(null);
+  const scenarioButtonRef = useRef(null);
+
+  // Brief confirmation shown after a scenario switch completes
+  // { name: string, startAgent: string|null } or null
+  const [scenarioConfirmed, setScenarioConfirmed] = useState(null);
+  const scenarioConfirmedTimerRef = useRef(null);
+  const showScenarioConfirmation = useCallback((name, startAgent) => {
+    if (scenarioConfirmedTimerRef.current) clearTimeout(scenarioConfirmedTimerRef.current);
+    setScenarioConfirmed({ name, startAgent });
+    scenarioConfirmedTimerRef.current = setTimeout(() => setScenarioConfirmed(null), 3500);
+  }, []);
+  useEffect(() => () => { if (scenarioConfirmedTimerRef.current) clearTimeout(scenarioConfirmedTimerRef.current); }, []);
+
+  // ── Derived scenario state from sessionScenarioConfig (single source of truth) ──
+  // The backend `/session/{sid}/scenarios` endpoint is canonical. All scenario
+  // state is derived from its response stored in `sessionScenarioConfig`.
+  // No custom_ prefix, no sync heuristics, no duplicate tracking.
+
+  // Active scenario key (lowercase, e.g., "banking")
+  const activeScenarioKey = sessionScenarioConfig?.active_scenario?.toLowerCase() || null;
+
+  // Active scenario data (the entry with is_active=true)
+  const activeScenarioData = useMemo(() => {
+    if (!sessionScenarioConfig?.scenarios) return null;
+    return sessionScenarioConfig.scenarios.find(s => s.is_active) || null;
+  }, [sessionScenarioConfig]);
+
+  // Icon from the active scenario
+  const activeScenarioIcon = activeScenarioData?.icon
+    || sessionScenarioConfig?.active_scenario_icon
+    || '🏦';
+
+  // Builtin scenarios for the menu (always available from the scenarios endpoint)
+  const builtinScenarios = useMemo(
+    () => sessionScenarioConfig?.builtin_scenarios || [],
+    [sessionScenarioConfig]
+  );
+
+  // Custom scenarios for the menu (exclude duplicates of builtins)
+  const customScenarios = useMemo(() => {
+    const custom = sessionScenarioConfig?.custom_scenarios || [];
+    if (custom.length === 0) return [];
+    const builtinNames = new Set(builtinScenarios.map(s => s.name?.toLowerCase()));
+    const seenNames = new Set();
+    return custom.filter(s => {
+      const normalizedName = s.name?.toLowerCase();
+      if (!normalizedName || seenNames.has(normalizedName)) return false;
+      if (builtinNames.has(normalizedName)) return false;
+      seenNames.add(normalizedName);
+      return true;
+    });
+  }, [sessionScenarioConfig, builtinScenarios]);
+
+  // Keep sessionStorage in sync with activeScenarioKey so that the legacy
+  // useRealTimeVoiceApp hook (and any other code reading the active scenario)
+  // always has the current value. This replaces the broken window.selectedScenario.
+  useEffect(() => {
+    if (activeScenarioKey) {
+      sessionStorage.setItem('voice_agent_active_scenario', activeScenarioKey);
+    }
+  }, [activeScenarioKey]);
+
+  // Profile menu state moved to ProfileButton component
+  const [editingSessionId, setEditingSessionId] = useState(false);
+  const [pendingSessionId, setPendingSessionId] = useState(() => getOrCreateSessionId());
+  const [sessionUpdating, setSessionUpdating] = useState(false);
+  const [sessionUpdateError, setSessionUpdateError] = useState(null);
+  const [currentCallId, setCurrentCallId] = useState(null);
+  const [showAgentPanel, setShowAgentPanel] = useState(false);
+  const [graphEvents, setGraphEvents] = useState([]);
+  const graphEventCounterRef = useRef(0);
+  const currentAgentRef = useRef("Concierge");
+  const [mainView, setMainView] = useState("chat"); // chat | graph | timeline
+  const [lastUserMessage, setLastUserMessage] = useState(null);
+  const [lastAssistantMessage, setLastAssistantMessage] = useState(null);
+
+  const appendLog = useCallback((message) => {
+    const line = `${new Date().toLocaleTimeString()} - ${message}`;
+    logBufferRef.current = logBufferRef.current
+      ? `${logBufferRef.current}\n${line}`
+      : line;
+    logger.debug(line);
+  }, []);
+
+  const appendGraphEvent = useCallback((event) => {
+    graphEventCounterRef.current += 1;
+    const ts = event.ts || event.timestamp || new Date().toISOString();
+    setGraphEvents((prev) => {
+      const trimmed = prev.length > 120 ? prev.slice(prev.length - 120) : prev;
+      return [...trimmed, { ...event, ts, id: `${ts}-${graphEventCounterRef.current}` }];
+    });
+  }, []);
+
+  const fetchSessionAgentConfig = useCallback(async (targetSessionId = sessionId) => {
+    if (!targetSessionId) return;
+    try {
+      const res = await fetch(
+        `${API_BASE_URL}/api/v1/agent-builder/session/${encodeURIComponent(targetSessionId)}`
+      );
+      if (res.status === 404) {
+        setSessionAgentConfig(null);
+        return;
+      }
+      if (!res.ok) return;
+      const data = await res.json();
+      setSessionAgentConfig(data);
+    } catch (err) {
+      appendLog(`Session agent fetch failed: ${err.message}`);
+    }
+  }, [sessionId, appendLog]);
+
+  useEffect(() => {
+    fetchSessionAgentConfig();
+  }, [fetchSessionAgentConfig]);
+
+  // Fetch all session scenarios (for custom scenarios list).
+  // Version-guarded: if an optimistic update fires between request-start and
+  // response-arrival, the stale response is silently discarded.
+  const fetchSessionScenarioConfig = useCallback(async (targetSessionId = sessionId) => {
+    if (!targetSessionId) return null;
+    const versionAtStart = scenarioVersionRef.current;
+    try {
+      const res = await fetch(
+        `${API_BASE_URL}/api/v1/scenario-builder/session/${encodeURIComponent(targetSessionId)}/scenarios`,
+        {
+          // Prevent browser caching to ensure fresh data after scenario changes
+          headers: { 'Cache-Control': 'no-cache' },
+        }
+      );
+      if (res.status === 404) {
+        // Only apply 404-null if no optimistic update happened since
+        if (scenarioVersionRef.current === versionAtStart) {
+          setSessionScenarioConfig(null);
+        }
+        return null;
+      }
+      if (!res.ok) return null;
+      const data = await res.json();
+
+      // Guard: discard this response if an optimistic update landed while
+      // the fetch was in flight — the optimistic state is more recent.
+      if (scenarioVersionRef.current !== versionAtStart) {
+        return data; // return data but don't apply — caller may inspect it
+      }
+
+      // Bump version BEFORE applying so that any concurrent fetch (started
+      // with the same versionAtStart) will fail this guard and be discarded.
+      // Without this, two rapid clicks that fire fetches at the same version
+      // would both pass and both apply, briefly showing stale state.
+      scenarioVersionRef.current += 1;
+
+      // Merge: preserve custom scenarios from optimistic state that the
+      // backend response may be missing (eventual consistency across workers).
+      setSessionScenarioConfig(prev => {
+        const prevCustom = prev?.custom_scenarios;
+        if (!prevCustom?.length) return data;
+
+        const responseCustomNames = new Set(
+          (data.custom_scenarios || []).map(s => s.name?.toLowerCase()),
+        );
+        const orphaned = prevCustom.filter(
+          s => s.name && !responseCustomNames.has(s.name.toLowerCase()),
+        );
+        if (!orphaned.length) return data;
+
+        const preserved = orphaned.map(s => ({
+          ...s,
+          is_active: s.name?.toLowerCase() === data.active_scenario?.toLowerCase(),
+        }));
+        const mergedCustom = [...(data.custom_scenarios || []), ...preserved];
+        return {
+          ...data,
+          custom_scenarios: mergedCustom,
+          scenarios: [...(data.builtin_scenarios || []), ...mergedCustom],
+          total: (data.builtin_scenarios?.length || 0) + mergedCustom.length,
+        };
+      });
+
+      // The backend response is the single source of truth for the active
+      // scenario's start agent.  Always apply it so that scenario switches
+      // from the sidebar menu, builder, or initial page load all behave
+      // consistently — no guard that only fires once on first load.
+      const startAgent = data.active_start_agent
+        || (data.scenarios || []).find(s => s.is_active)?.start_agent;
+      if (startAgent) {
+        currentAgentRef.current = startAgent;
+        setSelectedAgentName(startAgent);
+        setAgentInventory(prev => prev ? { ...prev, startAgent } : prev);
+      }
+      return data;
+    } catch (err) {
+      appendLog(`Session scenarios fetch failed: ${err.message}`);
+      return null;
+    }
+  }, [sessionId, appendLog]);
+
+  // Optimistically update scenario state without a network round-trip.
+  // Accepts either a scenario name (to flip active flags on existing entries)
+  // or a full scenarioEntry object (to upsert into custom_scenarios when
+  // creating a brand-new scenario).  Returns the previous state snapshot
+  // so callers can roll back on API failure.
+  const applyScenarioOptimistically = useCallback((scenarioNameOrEntry, startAgent) => {
+    // Bump version so any in-flight fetchSessionScenarioConfig discards
+    // its stale response instead of overwriting this optimistic state.
+    scenarioVersionRef.current += 1;
+    const prevSnapshot = sessionScenarioConfigRef.current;
+    // When prev is null (e.g., fresh session before first fetch), build a
+    // minimal wrapper so the switch isn't silently swallowed.
+    const base = prevSnapshot || { scenarios: [], builtin_scenarios: [], custom_scenarios: [] };
+    const isEntry = scenarioNameOrEntry && typeof scenarioNameOrEntry === 'object';
+    const scenarioName = isEntry ? scenarioNameOrEntry.name : scenarioNameOrEntry;
+    const nameLower = scenarioName?.toLowerCase();
+
+    // Helper: flip is_active on an array of scenario objects
+    const flipActive = (arr) => (arr || []).map(s => ({
+      ...s,
+      is_active: s.name?.toLowerCase() === nameLower,
+    }));
+
+    let updatedScenarios = flipActive(base.scenarios);
+    const updatedBuiltins = flipActive(base.builtin_scenarios);
+    let updatedCustom = flipActive(base.custom_scenarios);
+
+    // If a full entry was provided and it doesn't already exist in
+    // custom_scenarios, upsert it so the UI has something to render.
+    if (isEntry) {
+      const exists = updatedCustom.some(s => s.name?.toLowerCase() === nameLower);
+      if (!exists) {
+        const newEntry = { ...scenarioNameOrEntry, is_active: true };
+        updatedCustom = [...updatedCustom, newEntry];
+        // Also add to the unified scenarios array
+        updatedScenarios = [...updatedScenarios, newEntry];
+      }
+    }
+
+    // Resolve icon from whichever array contains the active scenario
+    const activeEntry =
+      updatedScenarios.find(s => s.is_active) ||
+      updatedBuiltins.find(s => s.is_active) ||
+      updatedCustom.find(s => s.is_active);
+    const resolvedIcon = activeEntry?.icon || (isEntry ? scenarioNameOrEntry.icon : null) || base.active_scenario_icon;
+    const resolvedStartAgent = startAgent || (isEntry ? scenarioNameOrEntry.start_agent : null) || null;
+
+    const nextState = {
+      ...base,
+      active_scenario: nameLower,
+      active_start_agent: resolvedStartAgent,
+      active_scenario_icon: resolvedIcon,
+      scenarios: updatedScenarios,
+      builtin_scenarios: updatedBuiltins,
+      custom_scenarios: updatedCustom,
+    };
+    sessionScenarioConfigRef.current = nextState;
+    setSessionScenarioConfig(nextState);
+    // Also update agent state synchronously
+    const resolvedAgent = startAgent
+      || (scenarioNameOrEntry && typeof scenarioNameOrEntry === 'object' ? scenarioNameOrEntry.start_agent : null);
+    if (resolvedAgent) {
+      currentAgentRef.current = resolvedAgent;
+      setSelectedAgentName(resolvedAgent);
+      setAgentInventory(prev => prev ? { ...prev, startAgent: resolvedAgent } : prev);
+    }
+    return prevSnapshot;
+  }, []);
+
+  const restoreScenarioSnapshot = useCallback((snapshot) => {
+    sessionScenarioConfigRef.current = snapshot;
+    setSessionScenarioConfig(snapshot);
+    if (snapshot?.active_start_agent) {
+      currentAgentRef.current = snapshot.active_start_agent;
+      setSelectedAgentName(snapshot.active_start_agent);
+      setAgentInventory(prev => prev ? { ...prev, startAgent: snapshot.active_start_agent } : prev);
+    }
+  }, []);
+
+  // Poll the backend until a just-saved scenario appears as the active
+  // scenario.  This avoids the race condition where a single fetch after
+  // save returns stale data (the backend hasn't propagated yet) and
+  // overwrites the optimistic state set by applyScenarioOptimistically.
+  //
+  // The function makes raw fetch calls without touching sessionScenarioConfig
+  // until the expected scenario is confirmed active.  If a new optimistic
+  // update fires while polling (user switches scenarios), polling aborts
+  // immediately to avoid clobbering the newer state.
+  const pollUntilScenarioPropagated = useCallback(async (
+    expectedScenarioName,
+    { maxAttempts = 3, intervalMs = 500 } = {},
+  ) => {
+    const nameLower = expectedScenarioName?.toLowerCase();
+    if (!nameLower || !sessionId) return null;
+
+    const startVersion = scenarioVersionRef.current;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      // Abort if a newer optimistic update landed (user switched scenarios)
+      if (scenarioVersionRef.current !== startVersion) return null;
+
+      if (attempt > 0) {
+        await new Promise(resolve => setTimeout(resolve, intervalMs));
+        // Re-check after sleeping
+        if (scenarioVersionRef.current !== startVersion) return null;
+      }
+
+      try {
+        const res = await fetch(
+          `${API_BASE_URL}/api/v1/scenario-builder/session/${encodeURIComponent(sessionId)}/scenarios`,
+          { headers: { 'Cache-Control': 'no-cache' } },
+        );
+        if (!res.ok) continue;
+        const data = await res.json();
+
+        // Check if the backend now shows the expected scenario as active
+        const propagated = data.active_scenario?.toLowerCase() === nameLower;
+        if (!propagated) continue;
+
+        // Final guard: abort if version changed during this fetch
+        if (scenarioVersionRef.current !== startVersion) return null;
+
+        // Backend has caught up — apply as confirmed truth and bump
+        // the version so any concurrent fetchSessionScenarioConfig
+        // discards its (now-stale) result.
+        scenarioVersionRef.current += 1;
+
+        // Merge: the backend response may be missing custom scenarios
+        // due to eventual consistency (stale in-memory cache on the
+        // worker that served the GET).  Preserve custom scenarios from
+        // the optimistic state that aren't in the response.
+        setSessionScenarioConfig(prev => {
+          const prevCustom = prev?.custom_scenarios;
+          if (!prevCustom?.length) return data;
+
+          const responseCustomNames = new Set(
+            (data.custom_scenarios || []).map(s => s.name?.toLowerCase()),
+          );
+          const orphaned = prevCustom.filter(
+            s => s.name && !responseCustomNames.has(s.name.toLowerCase()),
+          );
+          if (!orphaned.length) return data;
+
+          // Deactivate preserved entries — we're confirming a different
+          // scenario as active, so these should be inactive.
+          const preserved = orphaned.map(s => ({ ...s, is_active: false }));
+          const mergedCustom = [...(data.custom_scenarios || []), ...preserved];
+          return {
+            ...data,
+            custom_scenarios: mergedCustom,
+            scenarios: [...(data.builtin_scenarios || []), ...mergedCustom],
+            total: (data.builtin_scenarios?.length || 0) + mergedCustom.length,
+          };
+        });
+
+        const startAgent = data.active_start_agent
+          || (data.scenarios || []).find(s => s.is_active)?.start_agent;
+        if (startAgent) {
+          currentAgentRef.current = startAgent;
+          setSelectedAgentName(startAgent);
+          setAgentInventory(prev => prev ? { ...prev, startAgent } : prev);
+        }
+        return data;
+      } catch {
+        // Network error — retry on next attempt
+      }
+    }
+
+    // Max attempts reached — keep the optimistic state intact.
+    // A future background refresh will eventually reconcile.
+    return null;
+  }, [sessionId]);
+
+  // Activate a scenario from the builder's template chips.
+  // Mirrors the sidebar's optimistic-update + POST + refetch flow so that
+  // clicking a template chip in the builder activates the scenario on the
+  // session, updates the sidebar, and switches the current agent.
+  const activateScenarioFromBuilder = useCallback(async (scenario, isBuiltin) => {
+    const scenarioName = scenario?.name;
+    if (!scenarioName || !sessionId) return;
+    const startAgent = scenario.start_agent || scenario.agents?.[0] || null;
+
+    setScenarioSwitching(scenarioName);
+
+    // Optimistic update — instant UI feedback
+    const prevState = applyScenarioOptimistically(
+      isBuiltin ? scenarioName : scenario,
+      startAgent,
+    );
+
+    // Capture version AFTER optimistic update.  If a newer action (save,
+    // another chip click, sidebar switch) lands while we're awaiting the
+    // POST, the version will have changed and we must NOT overwrite state.
+    const activationVersion = scenarioVersionRef.current;
+
+    try {
+      let response;
+      if (isBuiltin) {
+        const id = scenarioName.toLowerCase().replace(/\s+/g, '_');
+        response = await fetch(
+          `${API_BASE_URL}/api/v1/scenario-builder/session/${encodeURIComponent(sessionId)}/apply-template?template_id=${encodeURIComponent(id)}`,
+          { method: 'POST' },
+        );
+      } else {
+        // Newly-created custom scenarios can race Redis/session propagation.
+        // Retry a few times before treating activation as failed.
+        const maxActivateAttempts = 3;
+        for (let attempt = 1; attempt <= maxActivateAttempts; attempt += 1) {
+          response = await fetch(
+            `${API_BASE_URL}/api/v1/scenario-builder/session/${encodeURIComponent(sessionId)}/active?scenario_name=${encodeURIComponent(scenarioName)}`,
+            { method: 'POST' },
+          );
+
+          if (response.ok || response.status !== 404 || attempt === maxActivateAttempts) {
+            break;
+          }
+
+          await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+        }
+      }
+
+      // Abort if a newer action superseded this activation
+      if (scenarioVersionRef.current !== activationVersion) {
+        setScenarioSwitching(null);
+        return;
+      }
+
+      if (!response.ok) {
+        // POST failed — only rollback if still current
+        if (scenarioVersionRef.current === activationVersion) {
+          scenarioVersionRef.current += 1;
+          // For custom scenarios, avoid aggressive eviction on 404 because
+          // save+activate can briefly race propagation and would remove a
+          // just-created scenario from the UI.
+          if (response.status === 404 && isBuiltin) {
+            const ghostName = scenarioName?.toLowerCase();
+            setSessionScenarioConfig(prev => {
+              if (!prev) return prev;
+              const prunedCustom = (prev.custom_scenarios || []).filter(
+                s => s.name?.toLowerCase() !== ghostName,
+              );
+              const prunedScenarios = (prev.scenarios || []).filter(
+                s => s.name?.toLowerCase() !== ghostName,
+              );
+              return {
+                ...prev,
+                custom_scenarios: prunedCustom,
+                scenarios: prunedScenarios,
+                total: prunedScenarios.length,
+              };
+            });
+          } else {
+            restoreScenarioSnapshot(prevState);
+          }
+        }
+        appendLog(`⚠️ Failed to activate scenario "${scenarioName}"`);
+        setScenarioSwitching(null);
+        return;
+      }
+
+      // Only set the agent from this POST if no newer activation superseded us
+      if (scenarioVersionRef.current === activationVersion) {
+        const data = await response.json();
+        const confirmedAgent = data?.scenario?.start_agent || startAgent;
+        if (confirmedAgent) {
+          currentAgentRef.current = confirmedAgent;
+          setSelectedAgentName(confirmedAgent);
+          setAgentInventory(prev => prev ? { ...prev, startAgent: confirmedAgent } : prev);
+        }
+        // POST succeeded — wait for backend propagation before applying
+        // any server state to avoid stale responses overwriting optimistic UI.
+        scenarioVersionRef.current += 1;
+        await pollUntilScenarioPropagated(scenarioName);
+      }
+showScenarioConfirmation(scenarioName, currentAgentRef.current);
+        setScenarioSwitching(null);
+    } catch (err) {
+      // Network error — only rollback if still current
+      if (scenarioVersionRef.current === activationVersion) {
+        scenarioVersionRef.current += 1;
+        restoreScenarioSnapshot(prevState);
+      }
+      appendLog(`Failed to activate scenario: ${err.message}`);
+      setScenarioSwitching(null);
+    }
+  }, [sessionId, applyScenarioOptimistically, restoreScenarioSnapshot, pollUntilScenarioPropagated, showScenarioConfirmation, appendLog]);
+
+  // Fetch session core memory for performance analysis
+  const fetchSessionCoreMemory = useCallback(async (targetSessionId = sessionId) => {
+    if (!targetSessionId) return;
+    try {
+      const res = await fetch(
+        `${API_BASE_URL}/api/v1/sessions/${encodeURIComponent(targetSessionId)}?include_memory=true&include_history=false`
+      );
+      if (!res.ok) {
+        setSessionCoreMemory(null);
+        setSessionMetadata(null);
+        return;
+      }
+      const data = await res.json();
+      setSessionCoreMemory(data.memory || null);
+      setSessionMetadata(data.session || null);
+    } catch (err) {
+      appendLog(`Session core memory fetch failed: ${err.message}`);
+      setSessionCoreMemory(null);
+      setSessionMetadata(null);
+    }
+  }, [sessionId, appendLog]);
+
+  const fetchSessionMetrics = useCallback(async (targetSessionId = sessionId) => {
+    if (!targetSessionId) return;
+    try {
+      const res = await fetch(
+        `${API_BASE_URL}/api/v1/metrics/session/${encodeURIComponent(targetSessionId)}`
+      );
+      if (!res.ok) {
+        setSessionMetrics(null);
+        return;
+      }
+      const data = await res.json();
+      setSessionMetrics(data || null);
+    } catch (err) {
+      appendLog(`Session metrics fetch failed: ${err.message}`);
+      setSessionMetrics(null);
+    }
+  }, [sessionId, appendLog]);
+
+  useEffect(() => {
+    fetchSessionScenarioConfig();
+    // Fetch core memory when session changes
+    fetchSessionCoreMemory();
+    fetchSessionMetrics();
+  }, [fetchSessionScenarioConfig, fetchSessionCoreMemory, fetchSessionMetrics]);
+
+  // Periodic refresh of core memory for real-time performance monitoring
+  useEffect(() => {
+    const interval = setInterval(() => {
+      // Only fetch if session performance panel is open
+      if (showAgentPanel && sessionId) {
+        fetchSessionCoreMemory();
+        fetchSessionMetrics();
+      }
+    }, 5000); // Refresh every 5 seconds
+
+    return () => clearInterval(interval);
+  }, [showAgentPanel, sessionId, fetchSessionCoreMemory, fetchSessionMetrics]);
+
+  // Refresh core memory when messages change (indicating session activity)
+  useEffect(() => {
+    if (showAgentPanel && sessionId && messages.length > 0) {
+      // Debounce to avoid too frequent requests
+      const timeout = setTimeout(() => {
+        fetchSessionCoreMemory();
+        fetchSessionMetrics();
+      }, 1000);
+      return () => clearTimeout(timeout);
+    }
+  }, [messages.length, showAgentPanel, sessionId, fetchSessionCoreMemory, fetchSessionMetrics]);
+
+  // Chat width resize listeners (placed after state initialization)
+  useEffect(() => {
+    const handleMouseMove = (e) => {
+      if (!isResizingChat) return;
+      const delta = e.clientX - resizeStartXRef.current;
+      const next = Math.min(1320, Math.max(900, chatWidthRef.current + delta));
+      setChatWidth(next);
+    };
+    const handleMouseUp = () => {
+      if (isResizingChat) {
+        chatWidthRef.current = chatWidth;
+        setIsResizingChat(false);
+      }
+    };
+    if (isResizingChat) {
+      window.addEventListener("mousemove", handleMouseMove);
+      window.addEventListener("mouseup", handleMouseUp);
+    }
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [isResizingChat, chatWidth]);
+
+  // Preload agent inventory from the health/agents endpoint so the topology can render before the first event.
+  const activeAgentNameRaw =
+    selectedAgentName ||
+    currentAgentRef.current ||
+    agentInventory?.startAgent ||
+    (agentInventory?.agents && agentInventory.agents[0]?.name) ||
+    "Concierge";
+  const activeAgentName = (activeAgentNameRaw || "").trim();
+
+  const activeAgentInfo = useMemo(() => {
+    if (agentDetail && (agentDetail.name || "").toLowerCase().trim() === activeAgentName.toLowerCase()) {
+      return agentDetail;
+    }
+    if (!agentInventory?.agents) return null;
+    const target = activeAgentName.toLowerCase();
+    return (
+      agentInventory.agents.find((a) => (a.name || "").toLowerCase().trim() === target) ||
+      null
+    );
+  }, [agentInventory, agentDetail, activeAgentName]);
+
+  const resolvedAgentName = activeAgentInfo?.name || activeAgentName;
+
+  const resolvedAgentTools = useMemo(() => {
+    if (!activeAgentInfo) return [];
+    return Array.isArray(activeAgentInfo.tools) ? activeAgentInfo.tools : [];
+  }, [activeAgentInfo]);
+
+  const resolvedHandoffTools = useMemo(
+    () => (Array.isArray(activeAgentInfo?.handoff_tools) ? activeAgentInfo.handoff_tools : []),
+    [activeAgentInfo]
+  );
+
+  const fetchAgentInventory = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/agents`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const agents = Array.isArray(data.agents) && data.agents.length > 0
+        ? data.agents
+        : (Array.isArray(data.summaries) ? data.summaries : []);
+      if (!Array.isArray(agents) || agents.length === 0) return;
+      const normalized = {
+        agents: agents.map((a) => ({
+          name: a.name,
+          description: a.description,
+          model: a.model?.deployment_id || a.model || null,
+          voice: a.voice?.current_voice || a.voice || null,
+          tools: a.tools || a.tool_names || a.toolNames || a.tools_preview || [],
+          handoffTools: a.handoff_tools || a.handoffTools || [],
+          toolCount:
+            a.tool_count ??
+            a.toolCount ??
+            (a.tools?.length ?? a.tool_names?.length ?? a.tools_preview?.length ?? 0),
+          templateId: deriveTemplateId(a.config_path || a.configPath || a.configPathname),
+          configPath: a.config_path || a.configPath || null,
+        })),
+        startAgent: data.start_agent || data.startAgent || null,
+          scenario: data.scenario || null,
+          handoffMap: data.handoff_map || data.handoffMap || {},
+        };
+        setAgentInventory(normalized);
+        // Start agent is managed by scenario state (fetchSessionScenarioConfig),
+        // NOT by the global agent inventory endpoint.
+    } catch (err) {
+      appendLog(`Agent preload failed: ${err.message}`);
+    }
+  }, [appendLog]);
+
+  useEffect(() => {
+    fetchAgentInventory();
+  }, [fetchAgentInventory]);
+
+  useEffect(() => {
+    setPendingSessionId(sessionId);
+  }, [sessionId]);
+
+  // Note: Removed auto-setting of currentAgentRef from sessionAgentConfig
+  // to prevent Agent Builder creations from overriding scenario start_agent.
+  // The agent is only set when explicitly selected by user or scenario.
+
+  useEffect(() => {
+    let cancelled = false;
+    const fetchAgentDetail = async () => {
+      if (!resolvedAgentName) return;
+      try {
+        const res = await fetch(
+          `${API_BASE_URL}/api/v1/agents/${encodeURIComponent(resolvedAgentName)}?session_id=${encodeURIComponent(sessionId)}`
+        );
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled) return;
+        setAgentDetail(data);
+      } catch (err) {
+        appendLog(`Agent detail fetch failed: ${err.message}`);
+      }
+    };
+    fetchAgentDetail();
+    return () => {
+      cancelled = true;
+    };
+  }, [resolvedAgentName, sessionId, appendLog]);
+
+  useEffect(() => {
+    if (!showAgentPanel) return;
+    fetchSessionAgentConfig();
+  }, [showAgentPanel, fetchSessionAgentConfig, resolvedAgentName]);
+
+  const resolveAgentLabel = useCallback((payload, fallback = null) => {
+    if (!payload || typeof payload !== "object") {
+      return fallback;
+    }
+    return (
+      payload.active_agent_label ||
+      payload.agent_label ||
+      payload.agentLabel ||
+      payload.agent_name ||
+      payload.agentName ||
+      payload.speaker ||
+      payload.sender ||
+      fallback
+    );
+  }, []);
+
+  const effectiveAgent = useCallback(() => {
+    const label = currentAgentRef.current;
+    if (label && label !== "System" && label !== "User") return label;
+    return null;
+  }, []);
+
+  const handleSendText = useCallback((rawText) => {
+    const trimmed = (rawText || "").trim();
+    if (!trimmed) return false;
+
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      // BARGE-IN: Stop TTS audio playback before sending text
+      // NOTE: We do NOT suspend the recording context (microphone) because
+      // the user should still be able to speak after sending text
+
+      // 1. Stop TTS playback audio context (speaker output) to interrupt agent speech
+      if (playbackAudioContextRef.current && playbackAudioContextRef.current.state === "running") {
+        playbackAudioContextRef.current.suspend();
+        appendLog("🛑 TTS playback interrupted by user text input");
+      }
+
+      // 2. Clear the audio playback queue to stop any buffered agent audio
+      if (pcmSinkRef.current) {
+        pcmSinkRef.current.port.postMessage({ type: 'clear' });
+      }
+
+      // Send as raw text message
+      socketRef.current.send(trimmed);
+
+      // Let backend echo the user message to avoid duplicate bubbles
+      appendLog(`User (text): ${trimmed}`);
+      setActiveSpeaker("User");
+      return true;
+    } else {
+      appendLog("⚠️ Cannot send text: WebSocket not connected");
+      return false;
+    }
+  }, [appendLog]);
+
+  const appendSystemMessage = useCallback((text, options = {}) => {
+    const timestamp = options.timestamp ?? new Date().toISOString();
+
+    if (options.variant === "session_stop") {
+      const dividerLabel =
+        options.dividerLabel ?? `Session paused · ${formatStatusTimestamp(timestamp)}`;
+      setMessages((prev) => [
+        ...prev,
+        {
+          type: "divider",
+          label: dividerLabel,
+          timestamp,
+        },
+      ]);
+      return;
+    }
+
+    const baseMessage = buildSystemMessage(text, { ...options, timestamp });
+    const shouldInsertDivider = options.withDivider === true;
+    const dividerLabel = shouldInsertDivider
+      ? options.dividerLabel ?? `Call disconnected · ${formatStatusTimestamp(timestamp)}`
+      : null;
+    setMessages((prev) => [
+      ...prev,
+      baseMessage,
+      ...(shouldInsertDivider
+        ? [
+            {
+              type: "divider",
+              label: dividerLabel,
+              timestamp,
+            },
+          ]
+        : []),
+    ]);
+  }, [setMessages]);
+
+  // ── Agent update toast (bottom-left) ──────────────────────────────────────
+  // Transient popup summarizing what changed, on which agent, in which scenario,
+  // whenever an agent is created/updated via the builders or Quick Tune.
+  const [agentUpdateToast, setAgentUpdateToast] = useState(null);
+  const agentUpdateToastTimer = useRef(null);
+
+  const formatVoiceShort = useCallback((v) => {
+    if (!v) return '—';
+    return String(v)
+      .replace(/^[a-z]{2}-[A-Z]{2}-/, '')
+      .replace(/MultilingualNeural$/i, '')
+      .replace(/Neural$/i, '');
+  }, []);
+
+  const notifyAgentUpdate = useCallback((agentConfig, action = 'updated') => {
+    if (!agentConfig?.name) return;
+    const name = agentConfig.name;
+    const scenarioName =
+      activeScenarioData?.label
+      || sessionScenarioConfig?.active_scenario
+      || activeScenarioKey
+      || 'No scenario';
+
+    const newModel =
+      agentConfig.cascade_model?.deployment_id || agentConfig.model?.deployment_id || null;
+    const newVoice = agentConfig.voice?.name || null;
+    const hasTools = Array.isArray(agentConfig.tools);
+    const newTools = hasTools ? agentConfig.tools.length : null;
+
+    // Diff against the inventory snapshot captured at the start of this handler
+    // (state updates are async, so this still holds the pre-update values).
+    const prior = agentInventory?.agents?.find((a) => a.name === name) || null;
+    const changes = [];
+    if (prior) {
+      if (prior.model && newModel && prior.model !== newModel) {
+        changes.push(`Model ${prior.model} → ${newModel}`);
+      } else if (!prior.model && newModel) {
+        changes.push(`Model → ${newModel}`);
+      }
+      if ((prior.voice || null) !== (newVoice || null)) {
+        changes.push(`Voice ${formatVoiceShort(prior.voice)} → ${formatVoiceShort(newVoice)}`);
+      }
+      if (hasTools) {
+        const priorTools = prior.toolCount ?? (prior.tools?.length ?? 0);
+        if (priorTools !== newTools) {
+          changes.push(`Tools ${priorTools} → ${newTools}`);
+        }
+      }
+      if ((prior.description || '') !== (agentConfig.description || '')) {
+        changes.push('Description updated');
+      }
+    }
+    if (changes.length === 0) {
+      // No prior snapshot or no detectable diff — show the salient settings.
+      if (newModel) changes.push(`Model ${newModel}`);
+      if (newVoice) changes.push(`Voice ${formatVoiceShort(newVoice)}`);
+      if (hasTools) changes.push(`${newTools} tool${newTools === 1 ? '' : 's'}`);
+    }
+
+    setAgentUpdateToast({ name, scenarioName, changes, action, ts: Date.now() });
+    if (agentUpdateToastTimer.current) clearTimeout(agentUpdateToastTimer.current);
+    agentUpdateToastTimer.current = setTimeout(() => setAgentUpdateToast(null), 8000);
+  }, [activeScenarioData, sessionScenarioConfig, activeScenarioKey, agentInventory, formatVoiceShort]);
+
+  const dismissAgentUpdateToast = useCallback(() => {
+    if (agentUpdateToastTimer.current) clearTimeout(agentUpdateToastTimer.current);
+    setAgentUpdateToast(null);
+  }, []);
+
+  useEffect(() => () => {
+    if (agentUpdateToastTimer.current) clearTimeout(agentUpdateToastTimer.current);
+  }, []);
+
+  const validateSessionId = useCallback(
+    async (id) => {
+      if (!id) return false;
+      const pattern = /^session_[0-9]{6,}_[A-Za-z0-9]+$/;
+      if (!pattern.test(id)) {
+        setSessionUpdateError("Session ID must match pattern: session_<timestamp>_<suffix>");
+        return false;
+      }
+      try {
+        const res = await fetch(
+          `${API_BASE_URL}/api/v1/metrics/session/${encodeURIComponent(id)}`
+        );
+        return res.ok;
+      } catch (err) {
+        appendLog(`Session validation failed: ${err.message}`);
+        return false;
+      }
+    },
+    [appendLog]
+  );
+
+  const handleSessionIdSave = useCallback(async () => {
+    const target = (pendingSessionId || "").trim();
+    if (!target) {
+      setSessionUpdateError("Session ID is required");
+      return;
+    }
+    if (target === sessionId) {
+      setEditingSessionId(false);
+      setSessionUpdateError(null);
+      return;
+    }
+    setSessionUpdating(true);
+    const isValid = await validateSessionId(target);
+    if (isValid) {
+      persistSessionId(target);
+      setSessionId(target);
+      setPendingSessionId(target);
+      setSessionUpdateError(null);
+      setEditingSessionId(false);
+      await fetchSessionAgentConfig(target);
+    } else {
+      setSessionUpdateError("Session not found or inactive. Reverting.");
+      setPendingSessionId(sessionId);
+    }
+    setSessionUpdating(false);
+  }, [pendingSessionId, sessionId, validateSessionId, fetchSessionAgentConfig]);
+
+  const handleSessionIdCancel = useCallback(() => {
+    setPendingSessionId(sessionId);
+    setSessionUpdateError(null);
+    setEditingSessionId(false);
+  }, [sessionId]);
+
+  const handleSystemStatus = useCallback((nextStatus = { status: "checking", acsOnlyIssue: false }) => {
+    setSystemStatus((prev) => {
+      const hasChanged =
+        !prev ||
+        prev.status !== nextStatus.status ||
+        prev.acsOnlyIssue !== nextStatus.acsOnlyIssue;
+
+      if (hasChanged && nextStatus?.status) {
+        appendLog(
+          `Backend status: ${nextStatus.status}${
+            nextStatus.acsOnlyIssue ? " (ACS configuration issue)" : ""
+          }`,
+        );
+      }
+
+      return hasChanged ? nextStatus : prev;
+    });
+  }, [appendLog]);
+
+  const [showDemoForm, setShowDemoForm] = useState(false);
+  const openDemoForm = useCallback(() => setShowDemoForm(true), [setShowDemoForm]);
+  const closeDemoForm = useCallback(() => setShowDemoForm(false), [setShowDemoForm]);
+  const [showAgentBuilder, setShowAgentBuilder] = useState(false);
+  const [showAgentScenarioBuilder, setShowAgentScenarioBuilder] = useState(false);
+  // When set, the builder deep-links into editing this live/session agent.
+  const [liveEditAgentName, setLiveEditAgentName] = useState(null);
+  // Live session-settings ("Quick Tune") popover — explore/edit/prototype model,
+  // voice, and VAD without opening the full builder. Persists via PUT /session
+  // and reconnects (or instant VoiceLive VAD/voice push when nothing structural changed).
+  const [showLiveSettings, setShowLiveSettings] = useState(false);
+  const [liveSettings, setLiveSettings] = useState({
+    // VoiceLive turn detection
+    silence_duration_ms: 700,
+    prefix_padding_ms: 240,
+    turn_detection_threshold: 0.5,
+    // Cascade STT
+    vad_silence_timeout_ms: 800,
+    use_semantic_segmentation: false,
+    // Shared voice (TTS)
+    voice_name: '',
+    voice_style: 'chat',
+    rate: 0, // percent, -50..50
+    pitch: 0, // percent, -50..50
+    // Models (per mode)
+    cascade_model: '',
+    voicelive_model: '',
+    // VoiceLive input transcription (STT) model
+    transcription_model: '',
+    // Voice Live BYOM (Bring Your Own Model) — VoiceLive only, opt-in
+    byom_mode: '',
+  });
+  const [liveSettingsBusy, setLiveSettingsBusy] = useState(false);
+  const [liveSettingsLoading, setLiveSettingsLoading] = useState(false);
+  const [liveVoices, setLiveVoices] = useState([]);
+  // Which settings surface the popover is showing: 'voicelive' | 'cascade'.
+  // Defaults from the active stream mode but the user can switch freely.
+  const [liveSettingsMode, setLiveSettingsMode] = useState('voicelive');
+  // Which Quick Tune mode toggle is currently hovered (shows an explainer
+  // tooltip contrasting Custom Speech vs VoiceLive). null = none hovered.
+  const [quickTuneTip, setQuickTuneTip] = useState(null);
+  // Whether the interactive "how orchestration works" diagram modal is open.
+  const [showOrchestrationDiagram, setShowOrchestrationDiagram] = useState(false);
+  // Snapshot of the current resolved agent config (base for the PUT merge).
+  const liveBaseConfigRef = useRef(null);
+  // Live model deployments from the connected Foundry resource ({cascade, voicelive}),
+  // used to populate the Quick Tune model dropdown (esp. for BYOM). null = not
+  // loaded / query failed → fall back to the static presets.
+  const [liveModelOptions, setLiveModelOptions] = useState(null);
+  const [builderInitialMode, setBuilderInitialMode] = useState('agents');
+  // When true, the scenario builder opens in "create new" mode (blank form, POST endpoint).
+  // When false, it opens in "edit existing" mode with the active custom scenario pre-filled.
+  const [builderScenarioCreateMode, setBuilderScenarioCreateMode] = useState(false);
+  const [createProfileHovered, setCreateProfileHovered] = useState(false);
+  const demoFormCloseTimeoutRef = useRef(null);
+  const profileHighlightTimeoutRef = useRef(null);
+  const [profileHighlight, setProfileHighlight] = useState(false);
+  const [showProfilePanel, setShowProfilePanel] = useState(false);
+  const lastProfileIdRef = useRef(null);
+  const realtimePanelRef = useRef(null);
+  const realtimePanelAnchorRef = useRef(null);
+  const triggerProfileHighlight = useCallback(() => {
+    setProfileHighlight(true);
+    if (profileHighlightTimeoutRef.current) {
+      clearTimeout(profileHighlightTimeoutRef.current);
+    }
+    profileHighlightTimeoutRef.current = window.setTimeout(() => {
+      setProfileHighlight(false);
+      profileHighlightTimeoutRef.current = null;
+    }, 3500);
+  }, []);
+  const isCallDisabled =
+    systemStatus.status === "degraded" && systemStatus.acsOnlyIssue;
+
+  useEffect(() => {
+    if (isCallDisabled) {
+      setShowPhoneInput(false);
+    }
+  }, [isCallDisabled]);
+
+  useEffect(() => {
+    return () => {
+      if (demoFormCloseTimeoutRef.current) {
+        clearTimeout(demoFormCloseTimeoutRef.current);
+        demoFormCloseTimeoutRef.current = null;
+      }
+      if (profileHighlightTimeoutRef.current) {
+        clearTimeout(profileHighlightTimeoutRef.current);
+        profileHighlightTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    try {
+      window.localStorage.setItem(
+        STREAM_MODE_STORAGE_KEY,
+        selectedStreamingMode,
+      );
+    } catch (err) {
+      logger.warn('Failed to persist streaming mode preference', err);
+    }
+  }, [selectedStreamingMode]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    try {
+      window.localStorage.setItem(
+        REALTIME_STREAM_MODE_STORAGE_KEY,
+        selectedRealtimeStreamingMode,
+      );
+    } catch (err) {
+      logger.warn('Failed to persist realtime streaming mode preference', err);
+    }
+  }, [selectedRealtimeStreamingMode]);
+
+  useEffect(() => {
+    if (!showPhoneInput) {
+      return undefined;
+    }
+
+    const handleOutsideClick = (event) => {
+      const panelNode = phonePanelRef.current;
+      const buttonNode = phoneButtonRef.current;
+      if (panelNode && panelNode.contains(event.target)) {
+        return;
+      }
+      if (buttonNode && buttonNode.contains(event.target)) {
+        return;
+      }
+      setShowPhoneInput(false);
+    };
+
+    document.addEventListener('mousedown', handleOutsideClick);
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
+  }, [showPhoneInput]);
+
+  useEffect(() => {
+    if (!showRealtimeModePanel) {
+      setPendingRealtimeStart(false);
+      return undefined;
+    }
+
+    const handleRealtimeOutsideClick = (event) => {
+      const panelNode = realtimePanelRef.current;
+      if (panelNode && panelNode.contains(event.target)) {
+        return;
+      }
+      setShowRealtimeModePanel(false);
+    };
+
+    document.addEventListener('mousedown', handleRealtimeOutsideClick);
+    return () => document.removeEventListener('mousedown', handleRealtimeOutsideClick);
+  }, [showRealtimeModePanel]);
+
+  useEffect(() => {
+    if (!showScenarioMenu) {
+      return undefined;
+    }
+
+    const handleScenarioOutsideClick = (event) => {
+      const buttonNode = scenarioButtonRef.current;
+      if (buttonNode && buttonNode.contains(event.target)) {
+        return;
+      }
+      // Check if click is inside the menu
+      const menuNode = document.querySelector('[data-scenario-menu]');
+      if (menuNode && menuNode.contains(event.target)) {
+        return;
+      }
+      setShowScenarioMenu(false);
+    };
+
+    document.addEventListener('mousedown', handleScenarioOutsideClick);
+    return () => document.removeEventListener('mousedown', handleScenarioOutsideClick);
+  }, [showScenarioMenu]);
+
+  // Close backend panel on outside click
+  useEffect(() => {
+    const handleOutsideClick = (event) => {
+      // Check if the BackendIndicator has a panel open
+      const panelNode = document.querySelector('[data-backend-panel]');
+      if (!panelNode) return;
+
+      // Don't close if clicking inside the panel
+      if (panelNode.contains(event.target)) {
+        return;
+      }
+
+      // Find the backend button and check if we clicked it
+      const buttons = document.querySelectorAll('button[title="Backend Status"]');
+      for (const button of buttons) {
+        if (button.contains(event.target)) {
+          return;
+        }
+      }
+
+      // Click was outside - trigger a click on the button to close
+      if (buttons.length > 0) {
+        buttons[0].click();
+      }
+    };
+
+    document.addEventListener('mousedown', handleOutsideClick);
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
+  }, []);
+
+  useEffect(() => {
+    if (recording) {
+      setShowRealtimeModePanel(false);
+    }
+  }, [recording]);
+
+  useLayoutEffect(() => {
+    if (!showRealtimeModePanel) {
+      return undefined;
+    }
+    if (typeof window === 'undefined') {
+      return undefined;
+    }
+
+    const updatePosition = () => {
+      const anchorEl = micButtonRef.current || realtimePanelAnchorRef.current;
+      const panelEl = realtimePanelRef.current;
+      if (!anchorEl || !panelEl) {
+        return;
+      }
+      const anchorRect = anchorEl.getBoundingClientRect();
+      const panelRect = panelEl.getBoundingClientRect();
+      let top = anchorRect.top - panelRect.height - PANEL_MARGIN;
+      if (top < PANEL_MARGIN) {
+        top = anchorRect.bottom + PANEL_MARGIN;
+      }
+      let left = anchorRect.left + anchorRect.width / 2 - panelRect.width / 2;
+      const maxLeft = window.innerWidth - panelRect.width - PANEL_MARGIN;
+      left = Math.min(
+        Math.max(left, PANEL_MARGIN),
+        Math.max(PANEL_MARGIN, maxLeft),
+      );
+      setRealtimePanelCoords({ top, left });
+    };
+
+    updatePosition();
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition, true);
+    };
+  }, [showRealtimeModePanel]);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') {
+      return;
+    }
+    if (!showDemoForm) {
+      document.body.style.removeProperty('overflow');
+      return;
+    }
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previousOverflow || '';
+    };
+  }, [showDemoForm]);
+
+  const handleStreamingModeChange = useCallback(
+    (mode) => {
+      if (!mode || mode === selectedStreamingMode) {
+        return;
+      }
+      setSelectedStreamingMode(mode);
+      logger.info(`🎚️ [FRONTEND] Streaming mode updated to ${mode}`);
+    },
+    [selectedStreamingMode],
+  );
+
+  const handleRealtimeStreamingModeChange = useCallback(
+    (mode) => {
+      if (!mode) {
+        return;
+      }
+      if (mode !== selectedRealtimeStreamingMode) {
+        setSelectedRealtimeStreamingMode(mode);
+        logger.info(`🎚️ [FRONTEND] Realtime streaming mode updated to ${mode}`);
+      }
+      const shouldStart = pendingRealtimeStart && !recording;
+      setPendingRealtimeStart(false);
+      setShowRealtimeModePanel(false);
+      if (shouldStart) {
+        startRecognitionRef.current?.(mode);
+      }
+    },
+    [pendingRealtimeStart, recording, selectedRealtimeStreamingMode],
+  );
+
+  const selectedStreamingModeLabel = AcsStreamingModeSelector.getLabel(
+    selectedStreamingMode,
+  );
+  const selectedRealtimeStreamingModeLabel = RealtimeStreamingModeSelector.getLabel(
+    selectedRealtimeStreamingMode,
+  );
+  const selectedRealtimeModeConfig = useMemo(() => {
+    const match = realtimeStreamingModeOptions.find(
+      (option) => option.value === selectedRealtimeStreamingMode,
+    );
+    return match?.config ?? null;
+  }, [realtimeStreamingModeOptions, selectedRealtimeStreamingMode]);
+
+  const updateToolMessage = useCallback(
+    (toolName, transformer, fallbackMessage) => {
+      setMessages((prev) => {
+        const next = [...prev];
+        let targetIndex = -1;
+
+        for (let idx = next.length - 1; idx >= 0; idx -= 1) {
+          const candidate = next[idx];
+          if (candidate?.isTool && candidate.text?.includes(`tool ${toolName}`)) {
+            targetIndex = idx;
+            break;
+          }
+        }
+
+        if (targetIndex === -1) {
+          if (!fallbackMessage) {
+            return prev;
+          }
+          const fallback =
+            typeof fallbackMessage === "function"
+              ? fallbackMessage()
+              : fallbackMessage;
+          return [...prev, fallback];
+        }
+
+        const current = next[targetIndex];
+        const updated = transformer(current);
+        if (!updated || updated === current) {
+          return prev;
+        }
+
+        next[targetIndex] = updated;
+        return next;
+      });
+    },
+    [setMessages],
+  );
+
+  // Health monitoring (disabled)
+  /*
+  const {
+    healthStatus = { isHealthy: null, lastChecked: null, responseTime: null, error: null },
+    readinessStatus = { status: null, timestamp: null, responseTime: null, checks: [], lastChecked: null, error: null },
+    overallStatus = { isHealthy: false, hasWarnings: false, criticalErrors: [] },
+    refresh = () => {}
+  } = useHealthMonitor({
+    baseUrl: API_BASE_URL,
+    healthInterval: 30000,
+    readinessInterval: 15000,
+    enableAutoRefresh: true,
+  });
+  */
+
+  // Function call state (disabled)
+  /*
+  const [functionCalls, setFunctionCalls] = useState([]);
+  const [callResetKey, setCallResetKey] = useState(0);
+  */
+
+  // Component refs
+  const chatRef = useRef(null);
+  const messageContainerRef = useRef(null);
+  const socketRef = useRef(null);
+  const relaySocketRef = useRef(null);
+  const phoneButtonRef = useRef(null);
+  const phonePanelRef = useRef(null);
+  const micButtonRef = useRef(null);
+  const micMutedRef = useRef(false);
+  const relayHealthIntervalRef = useRef(null);
+  const relayReconnectTimeoutRef = useRef(null);
+  const handleSocketMessageRef = useRef(null);
+  const openRelaySocketRef = useRef(null);
+  const callLifecycleRef = useRef({
+    pending: false,
+    active: false,
+    callId: null,
+    lastEnvelopeAt: 0,
+    reconnectAttempts: 0,
+    reconnectScheduled: false,
+    stalledLoggedAt: null,
+    lastRelayOpenedAt: 0,
+  });
+
+  // Audio processing refs
+  const audioContextRef = useRef(null);
+  const processorRef = useRef(null);
+  const analyserRef = useRef(null);
+  const micStreamRef = useRef(null);
+
+  // Audio playback refs for AudioWorklet
+  const playbackAudioContextRef = useRef(null);
+  const pcmSinkRef = useRef(null);
+  const playbackActiveRef = useRef(false);
+  const assistantStreamGenerationRef = useRef(0);
+  const currentAudioGenerationRef = useRef(0); // Generation when current audio stream started
+  const terminationReasonRef = useRef(null);
+  const resampleWarningRef = useRef(false);
+  const audioInitFailedRef = useRef(false);
+  const audioInitAttemptedRef = useRef(false);
+  const shouldReconnectRef = useRef(false);
+  const reconnectTimeoutRef = useRef(null);
+  const reconnectAttemptsRef = useRef(0);
+
+  const audioLevelRef = useRef(0);
+  const outputAudioLevelRef = useRef(0);
+  const outputLevelDecayTimeoutRef = useRef(null);
+  const startRecognitionRef = useRef(null);
+  const stopRecognitionRef = useRef(null);
+
+  const cancelOutputLevelDecay = useCallback(() => {
+    if (outputLevelDecayTimeoutRef.current && typeof window !== 'undefined') {
+      window.clearTimeout(outputLevelDecayTimeoutRef.current);
+      outputLevelDecayTimeoutRef.current = null;
+    }
+  }, []);
+
+  const scheduleOutputLevelDecay = useCallback(() => {
+    if (typeof window === 'undefined') {
+      outputAudioLevelRef.current = 0;
+      return;
+    }
+    cancelOutputLevelDecay();
+    const decayStep = () => {
+      let next = outputAudioLevelRef.current * 0.78;
+      if (next < 0.002) {
+        next = 0;
+      }
+      outputAudioLevelRef.current = next;
+      if (next > 0) {
+        outputLevelDecayTimeoutRef.current = window.setTimeout(decayStep, 160);
+      } else {
+        outputLevelDecayTimeoutRef.current = null;
+      }
+    };
+    outputLevelDecayTimeoutRef.current = window.setTimeout(decayStep, 200);
+  }, [cancelOutputLevelDecay]);
+
+  const clearTtsPlaybackQueue = useCallback(
+    (reason) => {
+      if (pcmSinkRef.current) {
+        pcmSinkRef.current.port.postMessage({ type: "clear" });
+      }
+      playbackActiveRef.current = false;
+      cancelOutputLevelDecay();
+      outputAudioLevelRef.current = 0;
+      if (playbackAudioContextRef.current && playbackAudioContextRef.current.state === "running") {
+        playbackAudioContextRef.current.suspend().catch(() => {});
+      }
+      if (reason) {
+        appendLog(`🔇 Cleared TTS audio queue (${reason})`);
+      }
+    },
+    [appendLog, cancelOutputLevelDecay],
+  );
+  const metricsRef = useRef(createMetricsState());
+  // Throttle hot-path UI updates for streaming text
+  const lastSttPartialUpdateRef = useRef(0);
+  const lastAssistantStreamUpdateRef = useRef(0);
+  // Buffer to accumulate streaming text between throttled UI updates
+  // This prevents dropped deltas when VoiceLive sends rapid character-level updates
+  const assistantStreamBufferRef = useRef({ turnId: null, text: "" });
+
+  const workletSource = `
+    class PcmSink extends AudioWorkletProcessor {
+      constructor() {
+        super();
+        this.queue = [];
+        this.readIndex = 0;
+        this.samplesProcessed = 0;
+        this.meter = 0;
+        this.meterSamples = 0;
+        this.meterInterval = sampleRate / 20; // ~50ms cadence
+        this.port.onmessage = (e) => {
+          if (e.data?.type === 'push') {
+            this.queue.push(e.data.payload);
+          } else if (e.data?.type === 'clear') {
+            this.queue = [];
+            this.readIndex = 0;
+            this.meter = 0;
+            this.meterSamples = 0;
+            this.port.postMessage({ type: 'meter', value: 0 });
+          }
+        };
+      }
+      process(inputs, outputs) {
+        const out = outputs[0][0];
+        let writeIndex = 0;
+        let sumSquares = 0;
+
+        while (writeIndex < out.length) {
+          if (this.queue.length === 0) {
+            break;
+          }
+
+          const chunk = this.queue[0];
+          const remain = chunk.length - this.readIndex;
+          const toCopy = Math.min(remain, out.length - writeIndex);
+
+          for (let n = 0; n < toCopy; n += 1) {
+            const sample = chunk[this.readIndex + n] || 0;
+            out[writeIndex + n] = sample;
+            sumSquares += sample * sample;
+          }
+
+          writeIndex += toCopy;
+          this.readIndex += toCopy;
+
+          if (this.readIndex >= chunk.length) {
+            this.queue.shift();
+            this.readIndex = 0;
+          }
+        }
+
+        if (writeIndex < out.length) {
+          out.fill(0, writeIndex);
+        }
+
+        const frameSamples = out.length;
+        const rmsInstant = frameSamples > 0 ? Math.sqrt(sumSquares / frameSamples) : 0;
+        const smoothing = rmsInstant > this.meter ? 0.35 : 0.15;
+        this.meter = this.meter + (rmsInstant - this.meter) * smoothing;
+        this.meterSamples += frameSamples;
+
+        if (this.meterSamples >= this.meterInterval) {
+          this.meterSamples = 0;
+          this.port.postMessage({ type: 'meter', value: this.meter });
+        }
+
+        this.samplesProcessed += frameSamples;
+        return true;
+      }
+    }
+    registerProcessor('pcm-sink', PcmSink);
+  `;
+
+  const resampleFloat32 = useCallback((input, fromRate, toRate) => {
+    if (!input || fromRate === toRate || !Number.isFinite(fromRate) || !Number.isFinite(toRate) || fromRate <= 0 || toRate <= 0) {
+      return input;
+    }
+
+    const resampleRatio = toRate / fromRate;
+    if (!Number.isFinite(resampleRatio) || resampleRatio <= 0) {
+      return input;
+    }
+
+    const newLength = Math.max(1, Math.round(input.length * resampleRatio));
+    const output = new Float32Array(newLength);
+    for (let i = 0; i < newLength; i += 1) {
+      const sourceIndex = i / resampleRatio;
+      const index0 = Math.floor(sourceIndex);
+      const index1 = Math.min(input.length - 1, index0 + 1);
+      const frac = sourceIndex - index0;
+      const sample0 = input[index0] ?? 0;
+      const sample1 = input[index1] ?? sample0;
+      output[i] = sample0 + (sample1 - sample0) * frac;
+    }
+    return output;
+  }, []);
+
+  const updateOutputLevelMeter = useCallback((samples, meterValue) => {
+    const previous = outputAudioLevelRef.current;
+    let target = previous;
+
+    if (typeof meterValue === "number" && Number.isFinite(meterValue)) {
+      target = Math.min(1, Math.max(0, meterValue * 1.35));
+    } else if (samples && samples.length) {
+      let sumSquares = 0;
+      for (let i = 0; i < samples.length; i += 1) {
+        const sample = samples[i] || 0;
+        sumSquares += sample * sample;
+      }
+      const rms = Math.sqrt(sumSquares / samples.length);
+      target = Math.min(1, rms * 10);
+    } else {
+      target = previous * 0.75;
+    }
+
+    const blend = target > previous ? 0.35 : 0.2;
+    let nextLevel = previous + (target - previous) * blend;
+
+    if (nextLevel < 0.002) {
+      nextLevel = 0;
+    }
+
+    outputAudioLevelRef.current = nextLevel;
+    scheduleOutputLevelDecay();
+  }, [scheduleOutputLevelDecay]);
+
+  // Initialize playback audio context and worklet (call on user gesture)
+  const initializeAudioPlayback = async () => {
+    if (playbackAudioContextRef.current?.state === "closed") {
+      playbackAudioContextRef.current = null;
+      pcmSinkRef.current = null;
+    }
+    if (playbackAudioContextRef.current) return; // Already initialized
+    if (audioInitFailedRef.current) return; // Already failed, don't retry
+    if (audioInitAttemptedRef.current) return; // Already attempting
+
+    audioInitAttemptedRef.current = true;
+
+    try {
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+        // Let browser use its native rate (usually 48kHz), worklet will handle resampling
+      });
+
+      // Add the worklet module
+      await audioCtx.audioWorklet.addModule(URL.createObjectURL(new Blob(
+        [workletSource], { type: 'text/javascript' }
+      )));
+
+      // Create the worklet node
+      const sink = new AudioWorkletNode(audioCtx, 'pcm-sink', {
+        numberOfInputs: 0,
+        numberOfOutputs: 1,
+        outputChannelCount: [1]
+      });
+      sink.connect(audioCtx.destination);
+      sink.port.onmessage = (event) => {
+        if (event?.data?.type === 'meter') {
+          updateOutputLevelMeter(undefined, event.data.value ?? 0);
+        }
+      };
+
+      // Resume on user gesture
+      await audioCtx.resume();
+
+      playbackAudioContextRef.current = audioCtx;
+      pcmSinkRef.current = sink;
+
+      appendLog("🔊 Audio playback initialized");
+      logger.info("AudioWorklet playback system initialized, context sample rate:", audioCtx.sampleRate);
+    } catch (error) {
+      audioInitFailedRef.current = true;
+      audioInitAttemptedRef.current = false;
+      logger.error("Failed to initialize audio playback:", error);
+      appendLog("❌ Audio playback init failed");
+    }
+  };
+
+
+  const resetCallLifecycle = useCallback(() => {
+    const state = callLifecycleRef.current;
+    state.pending = false;
+    state.active = false;
+    state.callId = null;
+    state.lastEnvelopeAt = 0;
+    state.reconnectAttempts = 0;
+    state.reconnectScheduled = false;
+    state.stalledLoggedAt = null;
+    state.lastRelayOpenedAt = 0;
+    if (relayReconnectTimeoutRef.current && typeof window !== "undefined") {
+      window.clearTimeout(relayReconnectTimeoutRef.current);
+      relayReconnectTimeoutRef.current = null;
+    }
+  }, []);
+
+  const closeRelaySocket = useCallback((reason = "client stop", options = {}) => {
+    const { preserveLifecycle = false } = options;
+    const relaySocket = relaySocketRef.current;
+    if (relayReconnectTimeoutRef.current && typeof window !== "undefined") {
+      window.clearTimeout(relayReconnectTimeoutRef.current);
+      relayReconnectTimeoutRef.current = null;
+    }
+    if (!relaySocket) {
+      if (!preserveLifecycle) {
+        resetCallLifecycle();
+      }
+      return;
+    }
+    try {
+      relaySocket.close(1000, reason);
+    } catch (error) {
+      logger.warn("Error closing relay socket:", error);
+    } finally {
+      if (relaySocketRef.current === relaySocket) {
+        relaySocketRef.current = null;
+      }
+      if (!preserveLifecycle) {
+        resetCallLifecycle();
+      }
+    }
+  }, [resetCallLifecycle]);
+  // Formatting functions moved to ProfileButton component
+  const activeSessionProfile = sessionProfiles[sessionId];
+  const hasActiveProfile = Boolean(activeSessionProfile?.profile);
+  useEffect(() => {
+    const profilePayload = activeSessionProfile?.profile;
+    const nextId = profilePayload?.id || activeSessionProfile?.sessionId || null;
+    if (!nextId) {
+      lastProfileIdRef.current = null;
+      setShowProfilePanel(false);
+      return;
+    }
+    if (lastProfileIdRef.current !== nextId) {
+      lastProfileIdRef.current = nextId;
+      setShowProfilePanel(true);
+    }
+  }, [activeSessionProfile]);
+
+  const handleDemoCreated = useCallback((demoPayload) => {
+    if (!demoPayload) {
+      return;
+    }
+    const ssn = demoPayload?.profile?.verification_codes?.ssn4;
+    const notice = demoPayload?.safety_notice ?? 'Demo data only.';
+    const sessionKey = demoPayload.session_id ?? sessionId;
+    let previouslyHadProfile = false;
+    const messageLines = [
+      'DEMO PROFILE GENERATED',
+      ssn ? `Temporary SSN Last 4: ${ssn}` : null,
+      notice,
+      'NEVER enter real customer or personal data in this environment.',
+    ].filter(Boolean);
+    setSessionProfiles((prev) => {
+      previouslyHadProfile = Boolean(prev[sessionKey]?.profile);
+      return {
+        ...prev,
+        [sessionKey]: buildSessionProfile(
+          demoPayload,
+          sessionKey,
+          prev[sessionKey],
+        ),
+      };
+    });
+    appendSystemMessage(messageLines.join('\n'), { tone: "warning" });
+    appendLog('Synthetic demo profile issued with sandbox identifiers');
+    if (!previouslyHadProfile) {
+      triggerProfileHighlight();
+    }
+    if (demoFormCloseTimeoutRef.current) {
+      clearTimeout(demoFormCloseTimeoutRef.current);
+    }
+    demoFormCloseTimeoutRef.current = window.setTimeout(() => {
+      closeDemoForm();
+      demoFormCloseTimeoutRef.current = null;
+    }, 1000);
+  }, [appendLog, appendSystemMessage, sessionId, triggerProfileHighlight, closeDemoForm]);
+
+  useEffect(() => {
+    return () => {
+      closeRelaySocket("component unmount");
+    };
+  }, [closeRelaySocket]);
+
+  useEffect(() => {
+    if (!recording) {
+      micMutedRef.current = false;
+      setMicMuted(false);
+    }
+  }, [recording]);
+
+  const handleResetSession = useCallback(() => {
+    const newSessionId = createNewSessionId();
+    setSessionId(newSessionId);
+    setSessionProfiles({});
+    setSessionAgentConfig(null); // Clear session-specific agent config
+    setSessionScenarioConfig(null); // Clear session-specific scenario config
+    sessionStorage.removeItem('voice_agent_active_scenario'); // Clear active scenario sync
+    setAgentInventory(null); // Clear agent inventory to remove session-specific agents
+    setSelectedAgentName(null); // Clear selected agent
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      logger.info('🔌 Closing WebSocket for session reset...');
+      try {
+        socketRef.current.close();
+      } catch (error) {
+        logger.warn('Error closing socket during reset', error);
+      }
+    }
+    setMessages([]);
+    setActiveSpeaker(null);
+    stopRecognitionRef.current?.();
+    setCallActive(false);
+    setCurrentCallId(null);
+    setShowPhoneInput(false);
+    setGraphEvents([]);
+    graphEventCounterRef.current = 0;
+    currentAgentRef.current = "Concierge";
+    micMutedRef.current = false;
+    setMicMuted(false);
+    closeRelaySocket("session reset");
+    appendLog(`🔄️ Session reset - new session ID: ${newSessionId}`);
+    // Re-fetch agent inventory for the new session (without old session agents)
+    setTimeout(() => {
+      fetchAgentInventory();
+      appendSystemMessage(
+        "Session restarted with new ID. Ready for a fresh conversation!",
+        { tone: "success" },
+      );
+    }, 500);
+  }, [appendLog, appendSystemMessage, closeRelaySocket, setSessionId, setSessionProfiles, setMessages, setActiveSpeaker, setCallActive, setShowPhoneInput, fetchAgentInventory]);
+
+  const handleMuteToggle = useCallback(() => {
+    if (!recording) {
+      return;
+    }
+    const next = !micMutedRef.current;
+    micMutedRef.current = next;
+    setMicMuted(next);
+    appendLog(next ? "🔇 Microphone muted" : "🔈 Microphone unmuted");
+  }, [appendLog, recording]);
+
+  const handleMicToggle = useCallback(() => {
+    if (recording) {
+      stopRecognitionRef.current?.();
+    } else {
+      micMutedRef.current = false;
+      setMicMuted(false);
+      setPendingRealtimeStart(true);
+      setShowRealtimeModePanel(true);
+    }
+  }, [recording]);
+
+  // Always-current ref so setTimeout callbacks in applyLiveSettings get the latest
+  // handleMicToggle (avoids stale-closure bug where the 2nd call sees recording=true).
+  const handleMicToggleRef = useRef(handleMicToggle);
+  useEffect(() => { handleMicToggleRef.current = handleMicToggle; }, [handleMicToggle]);
+
+  const terminateACSCall = useCallback(async () => {
+    if (!callActive && !currentCallId) {
+      stopRecognitionRef.current?.();
+      return;
+    }
+
+    const payload =
+      currentCallId != null
+        ? {
+            call_id: currentCallId,
+            session_id: getOrCreateSessionId(),
+            reason: "normal",
+          }
+        : null;
+    try {
+      if (payload) {
+        const res = await fetch(`${API_BASE_URL}/api/v1/calls/terminate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+          const errorBody = await res.json().catch(() => ({}));
+          appendLog(
+            `Hangup failed: ${errorBody.detail || res.statusText || res.status}`
+          );
+        } else {
+          appendLog("📴 Hangup requested");
+        }
+      }
+    } catch (err) {
+      appendLog(`Hangup error: ${err?.message || err}`);
+    } finally {
+      stopRecognitionRef.current?.();
+      setCallActive(false);
+      setActiveSpeaker(null);
+      setShowPhoneInput(false);
+      setCurrentCallId(null);
+      resetCallLifecycle();
+      closeRelaySocket("call terminated");
+    }
+  }, [
+    appendLog,
+    closeRelaySocket,
+    resetCallLifecycle,
+    callActive,
+    currentCallId,
+    setCallActive,
+    setShowPhoneInput,
+  ]);
+
+  const handlePhoneButtonClick = useCallback(() => {
+    if (isCallDisabled && !callActive) {
+      return;
+    }
+    if (callActive) {
+      terminateACSCall();
+      return;
+    }
+    setShowPhoneInput((prev) => !prev);
+  }, [isCallDisabled, callActive, setShowPhoneInput, terminateACSCall]);
+
+  // Load the current resolved agent config + voices when the Quick Tune popover
+  // opens, so the controls reflect what's actually running.
+  const loadLiveSettings = useCallback(async () => {
+    const agentName = resolvedAgentName;
+    setLiveSettingsLoading(true);
+    try {
+      const [voicesRes, sessionRes, templatesRes] = await Promise.all([
+        fetch(`${API_BASE_URL}/api/v1/agent-builder/voices`).catch(() => null),
+        fetch(`${API_BASE_URL}/api/v1/agent-builder/session/${encodeURIComponent(sessionId)}`).catch(() => null),
+        fetch(`${API_BASE_URL}/api/v1/agent-builder/templates?session_id=${encodeURIComponent(sessionId)}`).catch(() => null),
+      ]);
+
+      // Live model deployments from the connected Foundry resource (for the model
+      // dropdown — important for BYOM, where the deployment is your own). Never
+      // throws; null on failure → static presets remain the fallback.
+      fetchFoundryModels().then((live) => {
+        setLiveModelOptions(live ? deriveModelOptions(live.models) : null);
+      });
+
+      if (voicesRes && voicesRes.ok) {
+        const vd = await voicesRes.json();
+        setLiveVoices(Array.isArray(vd.voices) ? vd.voices : []);
+      }
+
+      // Prefer the live session-agent config; fall back to the agent's template.
+      let base = null;
+      if (sessionRes && sessionRes.ok) {
+        const sd = await sessionRes.json();
+        base = sd.config || null;
+      }
+      if (!base && templatesRes && templatesRes.ok) {
+        const td = await templatesRes.json();
+        const target = (agentName || '').toLowerCase().trim();
+        base = (td.templates || []).find(
+          (t) => String(t.name || '').toLowerCase().trim() === target
+        ) || null;
+      }
+      liveBaseConfigRef.current = base;
+
+      const session = base?.session || {};
+      const td = session.turn_detection || {};
+      const speech = base?.speech || {};
+      const voice = base?.voice || {};
+      setLiveSettings((s) => ({
+        ...s,
+        silence_duration_ms: td.silence_duration_ms ?? session.silence_duration_ms ?? s.silence_duration_ms,
+        prefix_padding_ms: td.prefix_padding_ms ?? session.prefix_padding_ms ?? s.prefix_padding_ms,
+        turn_detection_threshold: td.threshold ?? session.turn_detection_threshold ?? s.turn_detection_threshold,
+        vad_silence_timeout_ms: speech.vad_silence_timeout_ms ?? s.vad_silence_timeout_ms,
+        use_semantic_segmentation: speech.use_semantic_segmentation ?? s.use_semantic_segmentation,
+        voice_name: voice.name || s.voice_name,
+        voice_style: voice.style || s.voice_style,
+        rate: parsePercent(voice.rate),
+        pitch: parsePercent(voice.pitch),
+        cascade_model: base?.cascade_model?.deployment_id || base?.model?.deployment_id || s.cascade_model,
+        voicelive_model: base?.voicelive_model?.deployment_id || s.voicelive_model,
+        transcription_model: session.input_audio_transcription_settings?.model || s.transcription_model,
+        byom_mode: base?.byom?.mode || '',
+      }));
+    } catch (e) {
+      appendLog(`⚠️ Failed to load current settings: ${e.message}`);
+    } finally {
+      setLiveSettingsLoading(false);
+    }
+  }, [resolvedAgentName, sessionId, appendLog]);
+
+  // Open/refresh the popover.
+  const toggleLiveSettings = useCallback(() => {
+    setShowLiveSettings((prev) => {
+      const next = !prev;
+      if (next) {
+        // Seed the panel's mode from the active stream, but let the user switch.
+        setLiveSettingsMode(selectedStreamingMode === 'voice_live' ? 'voicelive' : 'cascade');
+        loadLiveSettings();
+      }
+      return next;
+    });
+  }, [loadLiveSettings, selectedStreamingMode]);
+
+  // Apply Quick Tune edits. Persists the full merged config via PUT /session
+  // (so it survives a reconnect), then either pushes VAD/voice live (VoiceLive,
+  // no model change) or reconnects the call/stream to apply structural changes.
+  const applyLiveSettings = useCallback(async () => {
+    const isVoiceLive = liveSettingsMode === 'voicelive';
+    const base = liveBaseConfigRef.current || {};
+    const ls = liveSettings;
+    // Instant push only makes sense when the panel's mode matches the ACTIVE
+    // stream (the live VoiceLive connection). Previewing the other mode always
+    // takes effect via persist + reconnect.
+    const modeMatchesActive = (selectedStreamingMode === 'voice_live') === isVoiceLive;
+
+    const baseCascadeModel = base.cascade_model?.deployment_id || base.model?.deployment_id || '';
+    const baseVoiceliveModel = base.voicelive_model?.deployment_id || '';
+    const modelChanged = isVoiceLive
+      ? (ls.voicelive_model && ls.voicelive_model !== baseVoiceliveModel)
+      : (ls.cascade_model && ls.cascade_model !== baseCascadeModel);
+
+    // BYOM is bound at connect() time (a WebSocket query param), so any BYOM
+    // change requires the persist + reconnect path — it can't be pushed live.
+    const baseByomMode = base.byom?.mode || '';
+    const byomChanged = isVoiceLive && (ls.byom_mode || '') !== baseByomMode;
+
+    setLiveSettingsBusy(true);
+    try {
+      // Fast path: VoiceLive active, only VAD/voice tweaks (no model/BYOM change) → instant push.
+      if (isVoiceLive && modeMatchesActive && !modelChanged && !byomChanged) {
+        const res = await fetch(
+          `${API_BASE_URL}/api/v1/agent-builder/session/${encodeURIComponent(sessionId)}/live-settings`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              mode: 'voicelive',
+              turn_detection: {
+                type: 'azure_semantic_vad',
+                threshold: Number(ls.turn_detection_threshold),
+                silence_duration_ms: Math.round(ls.silence_duration_ms),
+                prefix_padding_ms: Math.round(ls.prefix_padding_ms),
+              },
+              voice: { name: ls.voice_name || undefined, rate: toPercent(ls.rate) },
+            }),
+          }
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        if (data.live) {
+          appendLog('⚡ Applied instantly (VoiceLive)');
+        } else {
+          appendLog('💾 Saved; will apply on next connect.');
+        }
+        notifyAgentUpdate(
+          { name: resolvedAgentName, voice: { name: ls.voice_name } },
+          'updated',
+        );
+        setShowLiveSettings(false);
+        return;
+      }
+
+      // Full path: persist the merged config (creates/updates the session agent),
+      // then reconnect so the model/STT change takes effect.
+      const prompt =
+        base.prompt_full || base.prompt || base.prompt_preview ||
+        'You are a helpful voice assistant.';
+      const payload = {
+        name: resolvedAgentName,
+        description: base.description || '',
+        greeting: base.greeting || '',
+        return_greeting: base.return_greeting || '',
+        handoff_trigger: base.handoff_trigger || '',
+        prompt,
+        tools: base.tools || [],
+        cascade_model: {
+          ...(base.cascade_model || base.model || {}),
+          deployment_id: ls.cascade_model || baseCascadeModel || 'gpt-4o',
+        },
+        voicelive_model: {
+          ...(base.voicelive_model || {}),
+          deployment_id: ls.voicelive_model || baseVoiceliveModel || 'gpt-realtime',
+        },
+        // BYOM is opt-in: only send a profile when a mode is selected.
+        byom: ls.byom_mode
+          ? {
+              mode: ls.byom_mode,
+            }
+          : null,
+        voice: {
+          ...(base.voice || {}),
+          name: ls.voice_name || base.voice?.name || 'en-US-AvaMultilingualNeural',
+          style: ls.voice_style || base.voice?.style || 'chat',
+          rate: toPercent(ls.rate),
+          pitch: toPercent(ls.pitch),
+        },
+        speech: {
+          ...(base.speech || {}),
+          vad_silence_timeout_ms: Math.round(ls.vad_silence_timeout_ms),
+          use_semantic_segmentation: Boolean(ls.use_semantic_segmentation),
+        },
+        session: {
+          ...(base.session || {}),
+          modalities: base.session?.modalities || ['TEXT', 'AUDIO'],
+          input_audio_format: base.session?.input_audio_format || 'PCM16',
+          output_audio_format: base.session?.output_audio_format || 'PCM16',
+          turn_detection_type: base.session?.turn_detection?.type || base.session?.turn_detection_type || 'azure_semantic_vad',
+          turn_detection_threshold: Number(ls.turn_detection_threshold),
+          silence_duration_ms: Math.round(ls.silence_duration_ms),
+          prefix_padding_ms: Math.round(ls.prefix_padding_ms),
+          tool_choice: base.session?.tool_choice || 'auto',
+          input_audio_transcription_settings: (ls.transcription_model || base.session?.input_audio_transcription_settings)
+            ? {
+                ...(base.session?.input_audio_transcription_settings || {}),
+                model: ls.transcription_model || base.session?.input_audio_transcription_settings?.model,
+              }
+            : null,
+        },
+        template_vars: base.template_vars || null,
+      };
+
+      const res = await fetch(
+        `${API_BASE_URL}/api/v1/agent-builder/session/${encodeURIComponent(sessionId)}`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        }
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+      appendLog('💾 Settings saved to live agent.');
+      notifyAgentUpdate(payload, 'updated');
+
+      if (callActive) {
+        appendLog('🔄 Restarting call to apply changes…');
+        terminateACSCall();
+        setTimeout(() => handlePhoneButtonClick(), 600);
+      } else if (recording) {
+        appendLog('🔄 Reconnecting stream to apply changes…');
+        handleMicToggle();
+        setTimeout(() => handleMicToggleRef.current(), 600);
+      } else {
+        appendLog('💾 Saved; will apply on next connect.');
+      }
+      setShowLiveSettings(false);
+    } catch (e) {
+      appendLog(`⚠️ Failed to apply settings: ${e.message}`);
+    } finally {
+      setLiveSettingsBusy(false);
+    }
+  }, [
+    liveSettingsMode,
+    selectedStreamingMode,
+    liveSettings,
+    sessionId,
+    resolvedAgentName,
+    callActive,
+    recording,
+    terminateACSCall,
+    handlePhoneButtonClick,
+    handleMicToggle,
+    appendLog,
+    notifyAgentUpdate,
+  ]);
+
+  const publishMetricsSummary = useCallback(
+    (label, detail) => {
+      if (!label) {
+        return;
+      }
+
+      let formatted = null;
+      if (typeof detail === "string") {
+        formatted = detail;
+        logger.debug(`[Metrics] ${label}: ${detail}`);
+      } else if (detail && typeof detail === "object") {
+        const entries = Object.entries(detail).filter(([, value]) => value !== undefined && value !== null && value !== "");
+        formatted = entries
+          .map(([key, value]) => `${key}=${value}`)
+          .join(" • ");
+        logger.debug(`[Metrics] ${label}`, detail);
+      } else {
+        logger.debug(`[Metrics] ${label}`, metricsRef.current);
+      }
+
+      appendLog(formatted ? `📈 ${label} — ${formatted}` : `📈 ${label}`);
+    },
+    [appendLog],
+  );
+
+  const {
+    interruptAssistantOutput,
+    recordBargeInEvent,
+    finalizeBargeInClear,
+  } = useBargeIn({
+    appendLog,
+    setActiveSpeaker,
+    assistantStreamGenerationRef,
+    pcmSinkRef,
+    playbackActiveRef,
+    metricsRef,
+    publishMetricsSummary,
+  });
+
+  const resetMetrics = useCallback(
+    (sessionId) => {
+      metricsRef.current = createMetricsState();
+      const metrics = metricsRef.current;
+      metrics.sessionStart = performance.now();
+      metrics.sessionStartIso = new Date().toISOString();
+      metrics.sessionId = sessionId;
+      publishMetricsSummary("Session metrics reset", {
+        sessionId,
+        at: metrics.sessionStartIso,
+      });
+    },
+    [publishMetricsSummary],
+  );
+
+  const registerUserTurn = useCallback(
+    (text) => {
+      const metrics = metricsRef.current;
+      const now = performance.now();
+      const turnId = metrics.turnCounter + 1;
+      metrics.turnCounter = turnId;
+      const turn = {
+        id: turnId,
+        userTs: now,
+        userTextPreview: text.slice(0, 80),
+      };
+      metrics.turns.push(turn);
+      metrics.currentTurnId = turnId;
+      metrics.awaitingAudioTurnId = turnId;
+      const elapsed = metrics.sessionStart != null ? toMs(now - metrics.sessionStart) : undefined;
+      publishMetricsSummary(`Turn ${turnId} user`, {
+        elapsedSinceStartMs: elapsed,
+      });
+    },
+    [publishMetricsSummary],
+  );
+
+  const registerAssistantStreaming = useCallback(
+    (speaker) => {
+      const metrics = metricsRef.current;
+      const now = performance.now();
+      let turn = metrics.turns.slice().reverse().find((t) => !t.firstTokenTs || !t.audioEndTs);
+      if (!turn) {
+        const turnId = metrics.turnCounter + 1;
+        metrics.turnCounter = turnId;
+        turn = {
+          id: turnId,
+          userTs: metrics.sessionStart ?? now,
+          synthetic: true,
+          userTextPreview: "[synthetic]",
+        };
+        metrics.turns.push(turn);
+        metrics.currentTurnId = turnId;
+      }
+
+      if (!turn.firstTokenTs) {
+        turn.firstTokenTs = now;
+        turn.firstTokenLatencyMs = turn.userTs != null ? now - turn.userTs : undefined;
+        if (metrics.firstTokenTs == null) {
+          metrics.firstTokenTs = now;
+        }
+        if (metrics.sessionStart != null && metrics.ttftMs == null) {
+          metrics.ttftMs = now - metrics.sessionStart;
+          publishMetricsSummary("TTFT captured", {
+            ttftMs: toMs(metrics.ttftMs),
+          });
+        }
+        publishMetricsSummary(`Turn ${turn.id} first token`, {
+          latencyMs: toMs(turn.firstTokenLatencyMs),
+          speaker,
+        });
+      }
+      metrics.currentTurnId = turn.id;
+    },
+    [publishMetricsSummary],
+  );
+
+  const registerAssistantFinal = useCallback(
+    (speaker) => {
+      const metrics = metricsRef.current;
+      const now = performance.now();
+      const turn = metrics.turns.slice().reverse().find((t) => !t.finalTextTs);
+      if (!turn) {
+        return;
+      }
+
+      if (!turn.finalTextTs) {
+        turn.finalTextTs = now;
+        turn.finalLatencyMs = turn.userTs != null ? now - turn.userTs : undefined;
+        metrics.awaitingAudioTurnId = turn.id;
+        publishMetricsSummary(`Turn ${turn.id} final text`, {
+          latencyMs: toMs(turn.finalLatencyMs),
+          speaker,
+        });
+        if (turn.audioStartTs != null) {
+          turn.finalToAudioMs = turn.audioStartTs - turn.finalTextTs;
+          publishMetricsSummary(`Turn ${turn.id} final→audio`, {
+            deltaMs: toMs(turn.finalToAudioMs),
+          });
+        }
+      }
+    },
+    [publishMetricsSummary],
+  );
+
+  const registerAudioFrame = useCallback(
+    (frameIndex, isFinal) => {
+      const metrics = metricsRef.current;
+      const now = performance.now();
+      metrics.lastAudioFrameTs = now;
+
+      const preferredId = metrics.awaitingAudioTurnId ?? metrics.currentTurnId;
+      let turn = preferredId != null ? metrics.turns.find((t) => t.id === preferredId) : undefined;
+      if (!turn) {
+        turn = metrics.turns.slice().reverse().find((t) => !t.audioEndTs);
+      }
+      if (!turn) {
+        return;
+      }
+
+      if ((frameIndex ?? 0) === 0 && turn.audioStartTs == null) {
+        turn.audioStartTs = now;
+        const deltaFromFinal = turn.finalTextTs != null ? now - turn.finalTextTs : undefined;
+        turn.finalToAudioMs = deltaFromFinal;
+        publishMetricsSummary(`Turn ${turn.id} audio start`, {
+          afterFinalMs: toMs(deltaFromFinal),
+          elapsedMs: turn.userTs != null ? toMs(now - turn.userTs) : undefined,
+        });
+      }
+
+      if (isFinal) {
+        turn.audioEndTs = now;
+        turn.audioPlaybackDurationMs = turn.audioStartTs != null ? now - turn.audioStartTs : undefined;
+        turn.totalLatencyMs = turn.userTs != null ? now - turn.userTs : undefined;
+        metrics.awaitingAudioTurnId = null;
+        publishMetricsSummary(`Turn ${turn.id} audio complete`, {
+          playbackDurationMs: toMs(turn.audioPlaybackDurationMs),
+          totalMs: toMs(turn.totalLatencyMs),
+        });
+      }
+    },
+    [publishMetricsSummary],
+  );
+
+  useEffect(() => {
+    const target = messageContainerRef.current || chatRef.current;
+    if (!target) return;
+    // Use instant scrolling while streaming to reduce layout thrash
+    const behavior = recording ? "auto" : "smooth";
+    target.scrollTo({ top: target.scrollHeight, behavior });
+  }, [messages, recording]);
+
+  useEffect(() => {
+    return () => {
+      if (processorRef.current) {
+        try {
+          processorRef.current.disconnect();
+        } catch (e) {
+          logger.warn("Cleanup error:", e);
+        }
+      }
+      if (audioContextRef.current) {
+        try {
+          audioContextRef.current.close();
+        } catch (e) {
+          logger.warn("Cleanup error:", e);
+        }
+      }
+      if (pcmSinkRef.current) {
+        try {
+          pcmSinkRef.current.port.onmessage = null;
+          pcmSinkRef.current = null;
+        } catch (e) {
+          logger.warn("Cleanup error:", e);
+        }
+      }
+      if (playbackAudioContextRef.current) {
+        try {
+          playbackAudioContextRef.current.close();
+        } catch (e) {
+          logger.warn("Cleanup error:", e);
+        }
+      }
+      playbackActiveRef.current = false;
+      shouldReconnectRef.current = false;
+      reconnectAttemptsRef.current = 0;
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+      if (socketRef.current) {
+        try {
+          socketRef.current.close();
+        } catch (e) {
+          logger.warn("Cleanup error:", e);
+        }
+        socketRef.current = null;
+      }
+      cancelOutputLevelDecay();
+      outputAudioLevelRef.current = 0;
+      audioLevelRef.current = 0;
+    };
+  }, [cancelOutputLevelDecay]);
+
+  const startRecognition = async (modeOverride) => {
+      clearTtsPlaybackQueue("mic start");
+      appendLog("🎤 PCM streaming started");
+      await initializeAudioPlayback();
+
+      const currentSessionId = sessionId || getOrCreateSessionId();
+      const realtimeMode = modeOverride || selectedRealtimeStreamingMode;
+      const realtimeReadableMode =
+        selectedRealtimeStreamingModeLabel || realtimeMode;
+      const activeRealtimeConfig = modeOverride
+        ? (realtimeStreamingModeOptions.find((option) => option.value === realtimeMode)?.config ?? null)
+        : selectedRealtimeModeConfig;
+
+      // Get user email from active session profile for pre-loading
+      const userEmail = activeSessionProfile?.profile?.email ||
+                       activeSessionProfile?.profile?.contact_info?.email || null;
+      const emailParam = userEmail ? `&user_email=${encodeURIComponent(userEmail)}` : '';
+
+      const currentScenario = activeScenarioKey || 'banking';
+      const activeScenarioNameForStart =
+        activeScenarioData?.name ||
+        (currentScenario ? currentScenario.replace(/_/g, ' ') : null);
+
+      // The scenario is passed as a query parameter on the WebSocket URL.
+      // The backend's _create_voice_live_handler already calls
+      // set_active_scenario_async with this value when the connection opens,
+      // so no separate pre-start POST is needed.
+      const scenarioForQuery = activeScenarioNameForStart || currentScenario;
+
+      const baseConversationUrl = `${WS_URL}/api/v1/browser/conversation?session_id=${currentSessionId}&streaming_mode=${encodeURIComponent(
+        realtimeMode,
+      )}${emailParam}&scenario=${encodeURIComponent(scenarioForQuery || currentScenario)}`;
+      resetMetrics(currentSessionId);
+      assistantStreamGenerationRef.current = 0;
+      assistantStreamBufferRef.current = { turnId: null, text: "" };
+      terminationReasonRef.current = null;
+      resampleWarningRef.current = false;
+      audioInitFailedRef.current = false;
+      audioInitAttemptedRef.current = false;
+      currentAudioGenerationRef.current = 0;
+      shouldReconnectRef.current = true;
+      reconnectAttemptsRef.current = 0;
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+      logger.info(
+        '🔗 [FRONTEND] Starting conversation WebSocket with session_id: %s (realtime_mode=%s)',
+        currentSessionId,
+        realtimeReadableMode,
+      );
+      if (activeRealtimeConfig) {
+        logger.debug(
+          '[FRONTEND] Realtime streaming mode config:',
+          activeRealtimeConfig,
+        );
+      }
+
+      const connectSocket = (isReconnect = false) => {
+        const ws = new WebSocket(baseConversationUrl);
+        ws.binaryType = "arraybuffer";
+
+        ws.onopen = () => {
+          appendLog(isReconnect ? "🔌 WS reconnected - Connected to backend!" : "🔌 WS open - Connected to backend!");
+          logger.info(
+            "WebSocket connection %s to backend at:",
+            isReconnect ? "RECONNECTED" : "OPENED",
+            baseConversationUrl,
+          );
+          reconnectAttemptsRef.current = 0;
+        };
+
+        ws.onclose = (event) => {
+          appendLog(`🔌 WS closed - Code: ${event.code}, Reason: ${event.reason}`);
+          logger.info("WebSocket connection CLOSED. Code:", event.code, "Reason:", event.reason);
+
+          if (socketRef.current === ws) {
+            socketRef.current = null;
+          }
+
+          if (!shouldReconnectRef.current) {
+            if (terminationReasonRef.current === "HUMAN_HANDOFF") {
+              appendLog("🔌 WS closed after live agent transfer");
+            }
+            return;
+          }
+
+          const attempt = reconnectAttemptsRef.current + 1;
+          reconnectAttemptsRef.current = attempt;
+          const delay = Math.min(5000, 250 * Math.pow(2, attempt - 1));
+          appendLog(`🔄 WS reconnect scheduled in ${Math.round(delay)} ms (attempt ${attempt})`);
+
+          if (reconnectTimeoutRef.current) {
+            clearTimeout(reconnectTimeoutRef.current);
+          }
+
+          reconnectTimeoutRef.current = window.setTimeout(() => {
+            reconnectTimeoutRef.current = null;
+            if (!shouldReconnectRef.current) {
+              return;
+            }
+            appendLog("🔄 Attempting WS reconnect…");
+            connectSocket(true);
+          }, delay);
+        };
+
+        ws.onerror = (err) => {
+          appendLog("❌ WS error - Check if backend is running");
+          logger.error("WebSocket error - backend might not be running:", err);
+        };
+
+        ws.onmessage = (event) => {
+          const handler = handleSocketMessageRef.current;
+          if (handler) {
+            handler(event);
+          }
+        };
+        socketRef.current = ws;
+        return ws;
+      };
+
+      connectSocket(false);
+
+      // 2) setup Web Audio for raw PCM @16 kHz
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micMutedRef.current = false;
+      setMicMuted(false);
+      micStreamRef.current = stream;
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+        sampleRate: 16000
+      });
+      audioContextRef.current = audioCtx;
+
+      const source = audioCtx.createMediaStreamSource(stream);
+
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.3;
+      analyserRef.current = analyser;
+
+      source.connect(analyser);
+
+      const bufferSize = 512;
+      const processor  = audioCtx.createScriptProcessor(bufferSize, 1, 1);
+      processorRef.current = processor;
+
+      analyser.connect(processor);
+
+      processor.onaudioprocess = (evt) => {
+        const float32 = evt.inputBuffer.getChannelData(0);
+        const isMuted = micMutedRef.current;
+        let target = 0;
+
+        const int16 = new Int16Array(float32.length);
+
+        if (isMuted) {
+          for (let i = 0; i < float32.length; i++) {
+            int16[i] = 0;
+          }
+        } else {
+          let sum = 0;
+          for (let i = 0; i < float32.length; i++) {
+            const sample = Math.max(-1, Math.min(1, float32[i]));
+            sum += sample * sample;
+            int16[i] = sample * 0x7fff;
+          }
+          const rms = Math.sqrt(sum / float32.length);
+          target = Math.min(1, rms * 10);
+        }
+
+        const previous = audioLevelRef.current;
+        const smoothing = target > previous ? 0.32 : 0.18;
+        const level = previous + (target - previous) * smoothing;
+        audioLevelRef.current = level;
+
+        const activeSocket = socketRef.current;
+        if (activeSocket && activeSocket.readyState === WebSocket.OPEN) {
+          activeSocket.send(int16.buffer);
+          // Debug: Confirm data sent
+          // logger.debug("PCM audio chunk sent to backend!");
+        } else {
+          logger.debug("WebSocket not open, did not send audio.");
+        }
+      };
+
+      source.connect(processor);
+      processor.connect(audioCtx.destination);
+      setRecording(true);
+    };
+
+    const stopRecognition = () => {
+      clearTtsPlaybackQueue("mic stop");
+      if (processorRef.current) {
+        try {
+          processorRef.current.disconnect();
+        } catch (e) {
+          logger.warn("Error disconnecting processor:", e);
+        }
+        processorRef.current = null;
+      }
+      if (audioContextRef.current) {
+        try {
+          audioContextRef.current.close();
+        } catch (e) {
+          logger.warn("Error closing audio context:", e);
+        }
+        audioContextRef.current = null;
+      }
+      if (micStreamRef.current) {
+        try {
+          micStreamRef.current.getTracks().forEach((track) => {
+            try {
+              track.stop();
+            } catch (trackError) {
+              logger.warn("Error stopping mic track:", trackError);
+            }
+          });
+        } catch (streamError) {
+          logger.warn("Error releasing microphone stream:", streamError);
+        }
+        micStreamRef.current = null;
+      }
+      playbackActiveRef.current = false;
+
+      shouldReconnectRef.current = false;
+      reconnectAttemptsRef.current = 0;
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+
+      if (socketRef.current) {
+        try {
+          socketRef.current.close(1000, "client stop");
+        } catch (e) {
+          logger.warn("Error closing socket:", e);
+        }
+        socketRef.current = null;
+      }
+
+      // Add session stopped divider instead of card
+      appendSystemMessage("🛑 Session stopped", { variant: "session_stop" });
+      setActiveSpeaker("System");
+      setRecording(false);
+      micMutedRef.current = false;
+      setMicMuted(false);
+      audioLevelRef.current = 0;
+      outputAudioLevelRef.current = 0;
+      cancelOutputLevelDecay();
+      appendLog("🛑 PCM streaming stopped");
+    };
+
+    startRecognitionRef.current = startRecognition;
+    stopRecognitionRef.current = stopRecognition;
+
+    const pushIfChanged = (arr, msg) => {
+      const normalizedMsg =
+        msg?.speaker === "System"
+          ? buildSystemMessage(msg.text ?? "", msg)
+          : msg;
+      if (arr.length === 0) return [...arr, normalizedMsg];
+      const last = arr[arr.length - 1];
+      if (last.speaker === normalizedMsg.speaker && last.text === normalizedMsg.text) return arr;
+      return [...arr, normalizedMsg];
+    };
+
+    const updateTurnMessage = (turnId, updater, options = {}) => {
+      const { createIfMissing = true, initial, speaker } = options;
+
+      setMessages((prev) => {
+        if (!turnId) {
+          if (!createIfMissing) {
+            return prev;
+          }
+          const base = typeof initial === "function" ? initial() : initial;
+          if (!base) {
+            return prev;
+          }
+          return [...prev, base];
+        }
+
+        // After handoff, a message may have been created with a speaker-qualified turnId
+        // (e.g., "abc123_DeclineSpecialist"). Check for that variant first if speaker is known.
+        const speakerQualifiedTurnId = speaker ? `${turnId}_${speaker}` : null;
+        let index = speakerQualifiedTurnId
+          ? prev.findIndex((m) => m.turnId === speakerQualifiedTurnId)
+          : -1;
+
+        // Fall back to looking for exact turnId match with SAME speaker
+        // This prevents finding a different agent's message with the same base turnId
+        if (index === -1 && speaker) {
+          index = prev.findIndex((m) => m.turnId === turnId && m.speaker === speaker);
+        }
+
+        // Final fallback: exact turnId match (for cases without speaker info)
+        if (index === -1) {
+          index = prev.findIndex((m) => m.turnId === turnId);
+        }
+
+        if (index === -1) {
+          if (!createIfMissing) {
+            return prev;
+          }
+          const base = typeof initial === "function" ? initial() : initial;
+          if (!base) {
+            return prev;
+          }
+          // DEDUPLICATION: Don't create a new message if the last message has same speaker+text
+          // This prevents duplicate bubbles when turnId changes but content is the same
+          const lastMsg = prev.at(-1);
+          if (lastMsg && lastMsg.speaker === base.speaker && lastMsg.text === base.text) {
+            // Update the existing message's turnId instead of creating duplicate
+            return prev.map((m, i) =>
+              i === prev.length - 1
+                ? { ...m, turnId: speaker ? `${turnId}_${speaker}` : turnId, streaming: false }
+                : m
+            );
+          }
+          // For new messages with a speaker, use qualified turnId to isolate from other agents
+          const effectiveTurnId = speaker ? `${turnId}_${speaker}` : turnId;
+          return [...prev, { ...base, turnId: effectiveTurnId }];
+        }
+
+        const current = prev[index];
+        const patch = typeof updater === "function" ? updater(current) : null;
+        if (patch == null) {
+          return prev;
+        }
+
+        // If the speaker changed (e.g., after handoff), create a new message
+        // instead of overwriting the previous agent's bubble
+        if (patch.speaker && current.speaker && patch.speaker !== current.speaker) {
+          const base = typeof initial === "function" ? initial() : initial;
+          // MUST use qualified turnId so subsequent lookups can find this message
+          const qualifiedTurnId = `${turnId}_${patch.speaker}`;
+          const newMsg = base
+            ? { ...base, ...patch, turnId: qualifiedTurnId }
+            : { ...patch, turnId: qualifiedTurnId };
+          // DEDUPLICATION: Don't add if last message already has same speaker+text
+          const lastMsg = prev.at(-1);
+          if (lastMsg && lastMsg.speaker === newMsg.speaker && lastMsg.text === newMsg.text) {
+            return prev.map((m, i) =>
+              i === prev.length - 1
+                ? { ...m, turnId: qualifiedTurnId, streaming: false }
+                : m
+            );
+          }
+          return [...prev, newMsg];
+        }
+
+        const next = [...prev];
+        next[index] = { ...current, ...patch, turnId: current.turnId };
+        return next;
+      });
+    };
+
+    const handleSocketMessage = async (event) => {
+      // Optional verbose tracing; disabled by default for perf
+      if (ENABLE_VERBOSE_STREAM_LOGS) {
+        if (typeof event.data === "string") {
+          try {
+            const msg = JSON.parse(event.data);
+            logger.debug("📨 WebSocket message received:", msg.type || "unknown", msg);
+          } catch (e) {
+            logger.debug("📨 Non-JSON WebSocket message:", event.data);
+            logger.debug(e);
+          }
+        } else {
+          logger.debug("📨 Binary WebSocket message received, length:", event.data.byteLength);
+        }
+      }
+
+      if (typeof event.data !== "string") {
+        // Binary audio data (legacy path)
+
+        // Resume audio context if suspended (after text barge-in)
+        if (audioContextRef.current && audioContextRef.current.state === "suspended") {
+          await audioContextRef.current.resume();
+          appendLog("▶️ Audio context resumed");
+        }
+
+        const ctx = audioContextRef.current || new AudioContext();
+        if (!audioContextRef.current) {
+          audioContextRef.current = ctx;
+        }
+
+        const buf = await event.data.arrayBuffer();
+        const audioBuf = await ctx.decodeAudioData(buf);
+        const src = ctx.createBufferSource();
+        src.buffer = audioBuf;
+        src.connect(ctx.destination);
+        src.start();
+        appendLog("🔊 Audio played");
+        return;
+      }
+
+      let payload;
+      try {
+        payload = JSON.parse(event.data);
+      } catch {
+        appendLog("Ignored non‑JSON frame");
+        return;
+      }
+
+      // --- NEW: Handle envelope format from backend ---
+      // If message is in envelope format, extract the actual payload
+      if (payload.type && payload.sender && payload.payload && payload.ts) {
+        const envelope = payload;
+        logger.debug("📨 Received envelope message:", {
+          type: envelope.type,
+          sender: envelope.sender,
+          topic: envelope.topic,
+          session_id: envelope.session_id,
+        });
+
+        const envelopeType = envelope.type;
+        const envelopeSender = envelope.sender;
+        const envelopeTimestamp = envelope.ts;
+        const envelopeSessionId = envelope.session_id;
+        const envelopeTopic = envelope.topic;
+        const actualPayload = envelope.payload ?? {};
+
+        let flattenedPayload;
+
+        // Transform envelope back to legacy format for compatibility
+        if (envelopeType === "event" && (actualPayload.event_type || actualPayload.eventType)) {
+          const evtType = actualPayload.event_type || actualPayload.eventType;
+          const eventData = {
+            ...(typeof actualPayload.data === "object" && actualPayload.data ? actualPayload.data : {}),
+            ...actualPayload,
+          };
+          delete eventData.event_type;
+          delete eventData.eventType;
+          flattenedPayload = {
+            ...eventData,
+            type: "event",
+            event_type: evtType,
+            event_data: eventData,
+            data: eventData,
+            message: actualPayload.message || eventData.message,
+            content: actualPayload.content || eventData.content || actualPayload.message,
+            sender: envelopeSender,
+            speaker: envelopeSender,
+          };
+        } else if (
+          envelopeType === "event" &&
+          actualPayload.message &&
+          !actualPayload.event_type &&
+          !actualPayload.eventType
+        ) {
+          const merged = { ...actualPayload };
+          merged.message = merged.message ?? actualPayload.message;
+          merged.content = merged.content ?? actualPayload.message;
+          merged.streaming = merged.streaming ?? false;
+          flattenedPayload = {
+            ...merged,
+            type: merged.type || "assistant",
+            sender: envelopeSender,
+            speaker: envelopeSender,
+          };
+        } else if (envelopeType === "assistant_streaming") {
+          const merged = { ...actualPayload };
+          merged.content = merged.content ?? merged.message ?? "";
+          merged.streaming = true;
+          flattenedPayload = {
+            ...merged,
+            type: "assistant_streaming",
+            sender: envelopeSender,
+            speaker: envelopeSender,
+          };
+        } else if (envelopeType === "status" && actualPayload.message) {
+          const merged = { ...actualPayload };
+          merged.message = merged.message ?? actualPayload.message;
+          merged.content = merged.content ?? actualPayload.message;
+          merged.statusLabel =
+            merged.statusLabel ?? merged.label ?? merged.status_label;
+          flattenedPayload = {
+            ...merged,
+            type: "status",
+            sender: envelopeSender,
+            speaker: envelopeSender,
+          };
+        } else {
+          // For other envelope types, use the payload directly and retain the type
+          flattenedPayload = {
+            ...actualPayload,
+            type: actualPayload.type || envelopeType,
+            sender: envelopeSender,
+            speaker: envelopeSender,
+          };
+        }
+
+        if (envelopeTimestamp && !flattenedPayload.ts) {
+          flattenedPayload.ts = envelopeTimestamp;
+        }
+        if (envelopeSessionId && !flattenedPayload.session_id) {
+          flattenedPayload.session_id = envelopeSessionId;
+        }
+        if (envelopeTopic && !flattenedPayload.topic) {
+          flattenedPayload.topic = envelopeTopic;
+        }
+
+        payload = flattenedPayload;
+        logger.debug("📨 Transformed envelope to legacy format:", payload);
+      }
+
+      // Normalize source/target for graph/timeline views
+      const inferredSpeaker = payload.speaker || payload.sender || payload.from;
+      if (!payload.from && inferredSpeaker) {
+        payload.from = inferredSpeaker;
+      }
+      if (!payload.to) {
+        // If speaker is user, target is current agent; otherwise target user by default.
+        if (inferredSpeaker === "User") {
+          payload.to = currentAgentRef.current || payload.agent_name || "Concierge";
+        } else if (inferredSpeaker) {
+          payload.to = "User";
+        }
+      }
+
+      if (callLifecycleRef.current.pending) {
+        callLifecycleRef.current.lastEnvelopeAt = Date.now();
+      }
+
+      const normalizedEventType =
+        payload.event_type ||
+        payload.eventType ||
+        (typeof payload.type === "string" && payload.type.startsWith("event_")
+          ? payload.type
+          : undefined);
+
+      if (normalizedEventType) {
+        payload.event_type = normalizedEventType;
+      }
+
+      if (normalizedEventType === "session_updated" || normalizedEventType === "agent_change") {
+        const combinedData = {
+          ...(typeof payload.event_data === "object" && payload.event_data ? payload.event_data : {}),
+          ...(typeof payload.data === "object" && payload.data ? payload.data : {}),
+        };
+
+        if (typeof payload.session === "object" && payload.session) {
+          combinedData.session = combinedData.session ?? payload.session;
+        }
+
+        let candidateAgent =
+          payload.active_agent_label ||
+          payload.agent_label ||
+          payload.agentLabel ||
+          payload.agent_name ||
+          combinedData.active_agent_label ||
+          combinedData.agent_label ||
+          combinedData.agentLabel ||
+          combinedData.agent_name;
+
+        if (!candidateAgent) {
+          const sessionInfo = combinedData.session;
+          if (sessionInfo && typeof sessionInfo === "object") {
+            candidateAgent =
+              sessionInfo.active_agent_label ||
+              sessionInfo.activeAgentLabel ||
+              sessionInfo.active_agent ||
+              sessionInfo.agent_label ||
+              sessionInfo.agentLabel ||
+              sessionInfo.agent_name ||
+              sessionInfo.agentName ||
+              sessionInfo.current_agent ||
+              sessionInfo.currentAgent ||
+              sessionInfo.handoff_target ||
+              sessionInfo.handoffTarget;
+          }
+        }
+
+        const agentLabel =
+          typeof candidateAgent === "string" ? candidateAgent.trim() : null;
+
+        if (agentLabel) {
+          const label = agentLabel;
+          combinedData.active_agent_label = combinedData.active_agent_label ?? label;
+          combinedData.agent_label = combinedData.agent_label ?? label;
+          combinedData.agent_name = combinedData.agent_name ?? label;
+          payload.active_agent_label = payload.active_agent_label ?? label;
+          payload.agent_label = payload.agent_label ?? label;
+          payload.agent_name = payload.agent_name ?? label;
+          const previousAgent =
+            payload.previous_agent ||
+            payload.previousAgent ||
+            combinedData.previous_agent ||
+            combinedData.previousAgent ||
+            combinedData.handoff_source ||
+            combinedData.handoffSource;
+          const fromAgent = previousAgent || currentAgentRef.current;
+          const reasonText =
+            payload.summary ||
+            combinedData.handoff_reason ||
+            combinedData.handoffReason ||
+            combinedData.message ||
+            "Agent switched";
+          if (fromAgent && label && label !== fromAgent) {
+            appendGraphEvent({
+              kind: "switch",
+              from: fromAgent,
+              to: label,
+              text: reasonText,
+              ts: payload.ts || payload.timestamp,
+            });
+            // Reset streaming state on agent handoff to force new bubble for new agent
+            assistantStreamGenerationRef.current += 1;
+            assistantStreamBufferRef.current = { turnId: null, text: "" };
+          }
+          if (label !== "System" && label !== "User") {
+            currentAgentRef.current = label;
+          }
+        }
+
+        const displayLabel = combinedData.active_agent_label || combinedData.agent_label;
+        const resolvedMessage =
+          payload.message ||
+          payload.summary ||
+          combinedData.message ||
+          (displayLabel ? `Active agent: ${displayLabel}` : null);
+
+        if (resolvedMessage) {
+          combinedData.message = resolvedMessage;
+          payload.summary = payload.summary ?? resolvedMessage;
+          payload.message = payload.message ?? resolvedMessage;
+        }
+
+        if (!combinedData.timestamp && payload.ts) {
+          combinedData.timestamp = payload.ts;
+        }
+
+        payload.data = combinedData;
+        payload.event_data = combinedData;
+        if (payload.type !== "event") {
+          payload.type = "event";
+        }
+      }
+
+      if (payload.event_type === "call_connected") {
+        setCallActive(true);
+        appendLog("📞 Call connected");
+        const lifecycle = callLifecycleRef.current;
+        lifecycle.pending = true;
+        lifecycle.active = true;
+        lifecycle.callId = payload.call_connection_id || lifecycle.callId;
+        lifecycle.lastEnvelopeAt = Date.now();
+        lifecycle.reconnectAttempts = 0;
+        lifecycle.reconnectScheduled = false;
+        lifecycle.stalledLoggedAt = null;
+        payload.summary = payload.summary ?? "Call connected";
+        payload.type = payload.type ?? "event";
+        appendGraphEvent({
+          kind: "event",
+          from: payload.speaker || "System",
+          to: currentAgentRef.current || "Concierge",
+          text: "Call connected",
+          ts: payload.ts || payload.timestamp,
+        });
+      }
+
+      if (payload.event_type === "call_disconnected") {
+        setCallActive(false);
+        setActiveSpeaker(null);
+        resetCallLifecycle();
+        closeRelaySocket("call disconnected");
+        appendLog("📞 Call ended");
+        payload.summary = payload.summary ?? "Call disconnected";
+        payload.type = payload.type ?? "event";
+        appendGraphEvent({
+          kind: "event",
+          from: payload.speaker || "System",
+          to: currentAgentRef.current || "Concierge",
+          text: "Call disconnected",
+          ts: payload.ts || payload.timestamp,
+        });
+      }
+
+      if (payload.type === "session_end") {
+        const reason = payload.reason || "UNKNOWN";
+        terminationReasonRef.current = reason;
+        if (reason === "HUMAN_HANDOFF") {
+          shouldReconnectRef.current = false;
+        }
+        resetCallLifecycle();
+        setCallActive(false);
+        setShowPhoneInput(false);
+        const normalizedReason =
+          typeof reason === "string" ? reason.split("_").join(" ") : String(reason);
+        const reasonText =
+          reason === "HUMAN_HANDOFF"
+            ? "Transferring you to a live agent. Please stay on the line."
+            : `Session ended (${normalizedReason})`;
+        setMessages((prev) =>
+          pushIfChanged(prev, { speaker: "System", text: reasonText })
+        );
+        setActiveSpeaker("System");
+        appendGraphEvent({
+          kind: "event",
+          from: "System",
+          to: currentAgentRef.current || "Concierge",
+          text: reasonText,
+          ts: payload.ts || payload.timestamp,
+        });
+        appendLog(`⚠️ Session ended (${reason})`);
+        playbackActiveRef.current = false;
+        if (pcmSinkRef.current) {
+          pcmSinkRef.current.port.postMessage({ type: "clear" });
+        }
+        return;
+      }
+
+      // Handle turn_metrics from backend - display TTFT/TTFB per turn
+      if (payload.type === "turn_metrics") {
+        const turnNum = payload.turn_number ?? payload.turnNumber ?? "?";
+        const ttftMs = payload.llm_ttft_ms ?? payload.llmTtftMs;
+        const ttfbMs = payload.tts_ttfb_ms ?? payload.ttsTtfbMs;
+        const sttMs = payload.stt_latency_ms ?? payload.sttLatencyMs;
+        const durationMs = payload.duration_ms ?? payload.durationMs;
+        const agentName = payload.agent_name ?? payload.agentName ?? "Concierge";
+
+        // Log to metrics panel
+        publishMetricsSummary(`Turn ${turnNum} server metrics`, {
+          ttfbMs: ttfbMs != null ? Math.round(ttfbMs) : undefined,
+          ttftMs: ttftMs != null ? Math.round(ttftMs) : undefined,
+          sttMs: sttMs != null ? Math.round(sttMs) : undefined,
+          durationMs: durationMs != null ? Math.round(durationMs) : undefined,
+          agent: agentName,
+        });
+
+        logger.debug(`📊 Turn ${turnNum} metrics from server:`, {
+          ttfbMs,
+          ttftMs,
+          sttMs,
+          durationMs,
+          agentName,
+        });
+
+        return;
+      }
+
+      if (payload.event_type === "stt_partial" && payload.data) {
+        const partialData = payload.data;
+        const partialText = (partialData.content || "").trim();
+        const partialMeta = {
+          reason: partialData.reason || "stt_partial",
+          trigger: partialData.streaming_type || "stt_partial",
+          at: partialData.stage || "partial",
+          action: "stt_partial",
+          sequence: partialData.sequence,
+        };
+
+        logger.debug("📝 STT partial detected:", {
+          text: partialText,
+          sequence: partialData.sequence,
+          trigger: partialMeta.trigger,
+        });
+
+        const bargeInEvent = recordBargeInEvent("stt_partial", partialMeta);
+        const shouldClearPlayback =
+          playbackActiveRef.current === true || !bargeInEvent?.clearIssuedTs;
+
+        if (shouldClearPlayback) {
+          interruptAssistantOutput(partialMeta, {
+            logMessage: "🔇 Audio cleared due to live speech (partial transcription)",
+          });
+
+          if (bargeInEvent) {
+            finalizeBargeInClear(bargeInEvent, { keepPending: true });
+          }
+        }
+
+        const now = (typeof performance !== "undefined" && performance.now)
+          ? performance.now()
+          : Date.now();
+        const throttleMs = 90;
+
+        if (partialText) {
+          const shouldUpdateUi = now - lastSttPartialUpdateRef.current >= throttleMs;
+          if (shouldUpdateUi) {
+            lastSttPartialUpdateRef.current = now;
+            const turnId =
+              partialData.turn_id ||
+              partialData.turnId ||
+              partialData.response_id ||
+              partialData.responseId ||
+              null;
+            let registeredTurn = false;
+
+            setMessages((prev) => {
+              const last = prev.at(-1);
+              if (
+                last?.speaker === "User" &&
+                last?.streaming &&
+                (!turnId || last.turnId === turnId)
+              ) {
+                if (last.text === partialText) {
+                  return prev;
+                }
+                const updated = prev.slice();
+                updated[updated.length - 1] = {
+                  ...last,
+                  text: partialText,
+                  streamingType: "stt_partial",
+                  sequence: partialData.sequence,
+                  language: partialData.language || last.language,
+                  turnId: turnId ?? last.turnId,
+                };
+                return updated;
+              }
+
+              registeredTurn = true;
+              return [
+                ...prev,
+                {
+                  speaker: "User",
+                  text: partialText,
+                  streaming: true,
+                  streamingType: "stt_partial",
+                  sequence: partialData.sequence,
+                  language: partialData.language,
+                  turnId: turnId ?? undefined,
+                },
+              ];
+            });
+
+            if (registeredTurn) {
+              registerUserTurn(partialText);
+            }
+          }
+        }
+
+        setActiveSpeaker("User");
+        return;
+      }
+
+      if (payload.event_type === "live_agent_transfer") {
+        terminationReasonRef.current = "HUMAN_HANDOFF";
+        shouldReconnectRef.current = false;
+        playbackActiveRef.current = false;
+        if (pcmSinkRef.current) {
+          pcmSinkRef.current.port.postMessage({ type: "clear" });
+        }
+        const reasonDetail =
+          payload.data?.reason ||
+          payload.data?.escalation_reason ||
+          payload.data?.message;
+        const transferText = reasonDetail
+          ? `Escalating to a live agent: ${reasonDetail}`
+          : "Escalating you to a live agent. Please hold while we connect.";
+        appendGraphEvent({
+          kind: "switch",
+          from: currentAgentRef.current || "Concierge",
+          to: payload.data?.target_agent || "Live Agent",
+          text: transferText,
+          ts: payload.ts || payload.timestamp,
+        });
+        currentAgentRef.current = payload.data?.target_agent || "Live Agent";
+        setMessages((prev) =>
+          pushIfChanged(prev, { speaker: "System", text: transferText })
+        );
+        setActiveSpeaker("System");
+        appendLog("🤝 Escalated to live agent");
+        return;
+      }
+
+      if (payload.type === "event") {
+        const eventType =
+          payload.event_type ||
+          payload.eventType ||
+          payload.name ||
+          payload.data?.event_type ||
+          "event";
+        // Agent inventory/debug info
+        if (eventType === "agent_inventory" || payload.payload?.type === "agent_inventory") {
+          const summary = formatAgentInventory(payload.payload || payload);
+          if (summary) {
+            setAgentInventory(summary);
+          }
+          // const agentCount = summary ? (summary.count ?? summary.agents?.length ?? 0) : 0;
+          // const names = summary?.agents?.slice(0, 5).map((a) => a.name).join(", ");
+          // setMessages((prev) => [
+          //   ...prev,
+          //   {
+          //     speaker: "System",
+          //     text: `Agents loaded (${agentCount})${summary?.scenario ? ` · scenario: ${summary.scenario}` : ""}${
+          //       names ? ` · ${names}` : ""
+          //     }`,
+          //     statusTone: "info",
+          //     meta: summary,
+          //   },
+          // ]);
+          appendGraphEvent({
+            kind: "system",
+            from: "System",
+            to: "Dashboard",
+            text: `Agent inventory (${summary?.source || "unified"})`,
+            ts: payload.ts || payload.timestamp,
+          });
+          appendLog(
+            `📦 Agent inventory received (${summary?.count ?? 0} agents${
+              summary?.scenario ? ` | scenario=${summary.scenario}` : ""
+            })`,
+          );
+          return;
+        }
+        const rawEventData =
+          payload.data ??
+          payload.event_data ??
+          (typeof payload.payload === "object" ? payload.payload : null);
+        const eventData =
+          rawEventData && typeof rawEventData === "object" ? rawEventData : {};
+        const eventTimestamp = payload.ts || new Date().toISOString();
+        const eventTopic = payload.topic || "session";
+        const cascadeType =
+          (eventType || "").toLowerCase().includes("speech_cascade") ||
+          (eventData.streaming_type || eventData.streamingType) === "speech_cascade";
+        const cascadeStage = (eventData.stage || eventData.phase || "").toLowerCase();
+        // Skip noisy cascade envelope parts; assistant/user bubbles already handle content
+        if (cascadeType && cascadeStage && cascadeStage !== "final") {
+          return;
+        }
+
+        const eventSpeaker =
+          eventData.speaker ||
+          eventData.agent ||
+          eventData.active_agent_label ||
+          payload.speaker ||
+          payload.sender ||
+          "System";
+        const eventSummary =
+          payload.summary ||
+          payload.message ||
+          describeEventData(eventData) ||
+          formatEventTypeLabel(eventType);
+        const eventAgent = resolveAgentLabel(
+          { ...payload, speaker: eventSpeaker, data: eventData },
+          currentAgentRef.current,
+        );
+        if (eventAgent && eventAgent !== "System" && eventAgent !== "User") {
+          currentAgentRef.current = eventAgent;
+        }
+
+        setMessages((prev) => [
+          ...prev,
+          {
+            type: "event",
+            speaker: eventSpeaker,
+            eventType,
+            data: eventData,
+            timestamp: eventTimestamp,
+            topic: eventTopic,
+            sessionId: payload.session_id || sessionId,
+          },
+        ]);
+        appendGraphEvent({
+          kind: "event",
+          from: eventSpeaker,
+          to: eventData?.target_agent || eventSpeaker,
+          text: eventSummary,
+          ts: eventTimestamp,
+        });
+        appendLog(`📡 Event received: ${eventType}`);
+        return;
+      }
+
+      // Handle audio_data messages from backend TTS
+      if (payload.type === "audio_data") {
+        try {
+          if (ENABLE_VERBOSE_STREAM_LOGS) {
+            logger.debug("🔊 Received audio_data message:", {
+              frame_index: payload.frame_index,
+              total_frames: payload.total_frames,
+              sample_rate: payload.sample_rate,
+              data_length: payload.data ? payload.data.length : 0,
+              is_final: payload.is_final,
+            });
+          }
+
+          const hasData = typeof payload.data === "string" && payload.data.length > 0;
+
+          const isFinalChunk =
+            payload.is_final === true ||
+            (Number.isFinite(payload.total_frames) &&
+              Number.isFinite(payload.frame_index) &&
+              payload.frame_index + 1 >= payload.total_frames);
+
+          const frameIndex = Number.isFinite(payload.frame_index) ? payload.frame_index : 0;
+
+          // Track generation for this audio stream - first frame starts a new stream
+          if (frameIndex === 0) {
+            currentAudioGenerationRef.current = assistantStreamGenerationRef.current;
+          }
+
+          // Check if barge-in happened - skip audio from cancelled turns
+          if (currentAudioGenerationRef.current !== assistantStreamGenerationRef.current) {
+            logger.debug(`🔇 Skipping stale audio frame (gen ${currentAudioGenerationRef.current} vs ${assistantStreamGenerationRef.current})`);
+            // Still mark as not active since we're skipping
+            playbackActiveRef.current = false;
+            return;
+          }
+
+          registerAudioFrame(frameIndex, isFinalChunk);
+
+          // Resume playback context if suspended (after text barge-in)
+          if (playbackAudioContextRef.current) {
+            const ctx = playbackAudioContextRef.current;
+            logger.debug(`[Audio] Playback context state: ${ctx.state}`);
+            if (ctx.state === "suspended") {
+              logger.info("[Audio] Resuming suspended playback context...");
+              await ctx.resume();
+              appendLog("▶️ TTS playback resumed");
+              logger.debug(`[Audio] Playback context state after resume: ${ctx.state}`);
+            }
+          } else {
+            logger.warn("[Audio] No playback context found, initializing...");
+            await initializeAudioPlayback();
+          }
+
+          if (!hasData) {
+            playbackActiveRef.current = !isFinalChunk;
+            updateOutputLevelMeter();
+            return;
+          }
+
+          // Decode base64 -> Int16 -> Float32 [-1, 1]
+          const bstr = atob(payload.data);
+          const buf = new ArrayBuffer(bstr.length);
+          const view = new Uint8Array(buf);
+          for (let i = 0; i < bstr.length; i++) view[i] = bstr.charCodeAt(i);
+          const int16 = new Int16Array(buf);
+          const float32 = new Float32Array(int16.length);
+          for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 0x8000;
+
+          if (ENABLE_VERBOSE_STREAM_LOGS) {
+            logger.debug(
+              `🔊 Processing TTS audio chunk: ${float32.length} samples, sample_rate: ${payload.sample_rate || 16000}`,
+            );
+            logger.debug("🔊 Audio data preview:", float32.slice(0, 10));
+          }
+
+          // Push to the worklet queue
+          if (pcmSinkRef.current) {
+            let samples = float32;
+            const playbackCtx = playbackAudioContextRef.current;
+            const sourceRate = payload.sample_rate;
+            if (playbackCtx && Number.isFinite(sourceRate) && sourceRate && playbackCtx.sampleRate !== sourceRate) {
+              samples = resampleFloat32(float32, sourceRate, playbackCtx.sampleRate);
+              if (!resampleWarningRef.current && ENABLE_VERBOSE_STREAM_LOGS) {
+                appendLog(`🎚️ Resampling audio ${sourceRate}Hz → ${playbackCtx.sampleRate}Hz`);
+                resampleWarningRef.current = true;
+              }
+            }
+            pcmSinkRef.current.port.postMessage({ type: 'push', payload: samples });
+            updateOutputLevelMeter(samples);
+            if (ENABLE_VERBOSE_STREAM_LOGS) {
+              appendLog(`🔊 TTS audio frame ${payload.frame_index + 1}/${payload.total_frames}`);
+            }
+          } else {
+            if (!audioInitFailedRef.current) {
+              logger.warn("Audio playback not initialized, attempting init...");
+              if (ENABLE_VERBOSE_STREAM_LOGS) {
+                appendLog("⚠️ Audio playback not ready, initializing...");
+              }
+              // Try to initialize if not done yet
+              await initializeAudioPlayback();
+              if (pcmSinkRef.current) {
+                let samples = float32;
+                const playbackCtx = playbackAudioContextRef.current;
+                const sourceRate = payload.sample_rate;
+                if (playbackCtx && Number.isFinite(sourceRate) && sourceRate && playbackCtx.sampleRate !== sourceRate) {
+                  samples = resampleFloat32(float32, sourceRate, playbackCtx.sampleRate);
+                  if (!resampleWarningRef.current && ENABLE_VERBOSE_STREAM_LOGS) {
+                    appendLog(`🎚️ Resampling audio ${sourceRate}Hz → ${playbackCtx.sampleRate}Hz`);
+                    resampleWarningRef.current = true;
+                  }
+                }
+                pcmSinkRef.current.port.postMessage({ type: 'push', payload: samples });
+                updateOutputLevelMeter(samples);
+                if (ENABLE_VERBOSE_STREAM_LOGS) {
+                  appendLog("🔊 TTS audio playing (after init)");
+                }
+              } else {
+                logger.error("Failed to initialize audio playback");
+                if (ENABLE_VERBOSE_STREAM_LOGS) {
+                  appendLog("❌ Audio init failed");
+                }
+              }
+            }
+            // If init already failed, silently skip audio frames
+          }
+          playbackActiveRef.current = !isFinalChunk;
+          return; // handled
+        } catch (error) {
+          logger.error("Error processing audio_data:", error);
+          appendLog("❌ Audio processing failed: " + error.message);
+        }
+      }
+
+      // --- Handle relay/broadcast messages with {sender, message} ---
+      if (payload.sender && payload.message) {
+        // Route all relay messages through the same logic
+        payload.speaker = payload.sender;
+        payload.content = payload.message;
+        // fall through to unified logic below
+      }
+      if (!payload || typeof payload !== "object") {
+        appendLog("Ignored malformed payload");
+        return;
+      }
+
+      const { type, content = "", message = "", speaker } = payload;
+      const txt = content || message;
+      const msgType = (type || "").toLowerCase();
+
+      if (msgType === "session_profile" || msgType === "demo_profile") {
+        const sessionKey = payload.session_id ?? sessionId;
+        if (sessionKey) {
+          setSessionProfiles((prev) => {
+            const normalized = buildSessionProfile(payload, sessionKey, prev[sessionKey]);
+            if (!normalized) {
+              return prev;
+            }
+            return {
+              ...prev,
+              [sessionKey]: normalized,
+            };
+          });
+          appendLog(`Session profile acknowledged for ${sessionKey}`);
+        }
+        return;
+      }
+
+      if (msgType === "user" || speaker === "User") {
+        setActiveSpeaker("User");
+        const turnId =
+          payload.turn_id ||
+          payload.turnId ||
+          payload.response_id ||
+          payload.responseId ||
+          null;
+        const isStreamingUser = payload.streaming === true;
+
+        if (turnId) {
+          updateTurnMessage(
+            turnId,
+            (current = {}) => ({
+              speaker: "User",
+              text: txt ?? current.text ?? "",
+              streaming: isStreamingUser,
+              streamingType: isStreamingUser ? "stt_final" : undefined,
+              cancelled: false,
+            }),
+            {
+              initial: () => ({
+                speaker: "User",
+                text: txt,
+                streaming: isStreamingUser,
+                streamingType: isStreamingUser ? "stt_final" : undefined,
+                turnId,
+              }),
+            },
+          );
+        } else {
+          setMessages((prev) => {
+            const last = prev.at(-1);
+            if (last?.speaker === "User" && last?.streaming) {
+              return prev.map((m, i) =>
+                i === prev.length - 1
+                  ? { ...m, text: txt, streaming: isStreamingUser }
+                  : m,
+              );
+            }
+            return [...prev, { speaker: "User", text: txt, streaming: isStreamingUser }];
+          });
+        }
+        appendLog(`User: ${txt}`);
+        setLastUserMessage(txt);
+        const shouldGraph =
+          !isStreamingUser || payload.is_final === true || payload.final === true;
+        if (shouldGraph) {
+          const targetAgent =
+            resolveAgentLabel(payload, effectiveAgent()) ||
+            effectiveAgent() ||
+            "Assistant";
+          appendGraphEvent({
+            kind: "message",
+            from: "User",
+            to: targetAgent,
+            text: txt,
+            ts: payload.ts || payload.timestamp,
+          });
+        }
+        return;
+      }
+
+      if (type === "assistant_cancelled") {
+        // Clear streaming buffer when response is cancelled
+        assistantStreamBufferRef.current = { turnId: null, text: "" };
+
+        const turnId =
+          payload.turn_id ||
+          payload.turnId ||
+          payload.response_id ||
+          payload.responseId ||
+          null;
+        const cancelledSpeaker = speaker || payload.active_agent || payload.sender || null;
+        if (turnId) {
+          updateTurnMessage(
+            turnId,
+            (current) =>
+              current
+                ? {
+                    streaming: false,
+                    cancelled: true,
+                    cancelReason:
+                      payload.cancel_reason ||
+                      payload.cancelReason ||
+                      payload.reason ||
+                      current.cancelReason,
+                  }
+                : null,
+            { createIfMissing: false, speaker: cancelledSpeaker },
+          );
+        }
+        setActiveSpeaker(null);
+        appendLog("🤖 Assistant response interrupted");
+        return;
+      }
+
+      if (type === "assistant_streaming") {
+        const streamingSpeaker = speaker || "Concierge";
+        const streamGeneration = assistantStreamGenerationRef.current;
+        registerAssistantStreaming(streamingSpeaker);
+        setActiveSpeaker(streamingSpeaker);
+        const now = (typeof performance !== "undefined" && performance.now)
+          ? performance.now()
+          : Date.now();
+        const throttleMs = 90;
+        const shouldUpdateUi = now - lastAssistantStreamUpdateRef.current >= throttleMs;
+        const turnId =
+          payload.turn_id ||
+          payload.turnId ||
+          payload.response_id ||
+          payload.responseId ||
+          null;
+
+        // Always accumulate streaming text into buffer (prevents dropped deltas)
+        // Track by turnId+speaker to prevent cross-agent contamination during handoffs
+        const buffer = assistantStreamBufferRef.current;
+        const bufferKey = turnId ? `${turnId}_${streamingSpeaker}` : null;
+        if (buffer.turnId !== bufferKey) {
+          buffer.turnId = bufferKey;
+          buffer.text = txt; // Start fresh for new turn or new speaker
+        } else {
+          buffer.text += txt; // Accumulate for same turn+speaker
+        }
+
+        if (shouldUpdateUi) {
+          lastAssistantStreamUpdateRef.current = now;
+          // Use accumulated buffer text instead of just current delta
+          const accumulatedText = buffer.text;
+
+          // Use speaker+streamGeneration as primary key for finding/updating streaming messages
+          // This is more robust than turnId alone, especially during handoffs where
+          // the same turnId may be used by multiple agents
+          setMessages((prev) => {
+            // Find the most recent streaming message for this speaker with matching generation
+            // Search backwards since we want the latest one
+            for (let idx = prev.length - 1; idx >= 0; idx -= 1) {
+              const candidate = prev[idx];
+              if (
+                candidate?.streaming &&
+                candidate?.speaker === streamingSpeaker &&
+                candidate?.streamGeneration === streamGeneration
+              ) {
+                // Found it - update in place
+                return prev.map((m, i) =>
+                  i === idx
+                    ? {
+                        ...m,
+                        text: accumulatedText,
+                        turnId: turnId || m.turnId,
+                        cancelled: false,
+                        cancelReason: undefined,
+                      }
+                    : m,
+                );
+              }
+            }
+
+            // No existing streaming message for this speaker+generation - create new one
+            return [
+              ...prev,
+              {
+                speaker: streamingSpeaker,
+                text: accumulatedText,
+                streaming: true,
+                streamGeneration,
+                turnId,
+                cancelled: false,
+              },
+            ];
+          });
+        }
+        const pending = metricsRef.current?.pendingBargeIn;
+        if (pending) {
+          finalizeBargeInClear(pending);
+        }
+        return;
+      }
+
+      if (msgType === "assistant" || msgType === "status" || speaker === "Concierge") {
+        // Clear streaming buffer when final message arrives
+        assistantStreamBufferRef.current = { turnId: null, text: "" };
+
+        if (msgType === "status") {
+          const normalizedStatus = (txt || "").toLowerCase();
+          if (
+            normalizedStatus.includes("call connected") ||
+            normalizedStatus.includes("call disconnected")
+          ) {
+            return;
+          }
+        }
+        const assistantSpeaker = resolveAgentLabel(payload, speaker || "Concierge");
+        registerAssistantFinal(assistantSpeaker);
+        setActiveSpeaker(assistantSpeaker);
+        const messageOptions = {
+          speaker: assistantSpeaker,
+          text: txt,
+        };
+        if (payload.statusLabel) {
+          messageOptions.statusLabel = payload.statusLabel;
+        }
+        if (payload.statusTone) {
+          messageOptions.statusTone = payload.statusTone;
+        }
+        if (payload.statusCaption) {
+          messageOptions.statusCaption = payload.statusCaption;
+        }
+        if (payload.ts || payload.timestamp) {
+          messageOptions.timestamp = payload.ts || payload.timestamp;
+        }
+        const turnId =
+          payload.turn_id ||
+          payload.turnId ||
+          payload.response_id ||
+          payload.responseId ||
+          null;
+
+        if (turnId) {
+          updateTurnMessage(
+            turnId,
+            (current) => ({
+              ...messageOptions,
+              text: txt ?? current?.text ?? "",
+              streaming: false,
+              cancelled: false,
+              cancelReason: undefined,
+            }),
+            {
+              // Pass speaker so we can find messages with speaker-qualified turnIds after handoff
+              speaker: assistantSpeaker,
+              initial: () => ({
+                ...messageOptions,
+                streaming: false,
+                cancelled: false,
+                turnId,
+              }),
+            },
+          );
+        } else {
+          setMessages((prev) => {
+            // Only finalize a streaming message if it belongs to the same speaker
+            // This prevents handoff responses from overwriting previous agent's bubbles
+            for (let idx = prev.length - 1; idx >= 0; idx -= 1) {
+              const candidate = prev[idx];
+              if (candidate?.streaming && candidate?.speaker === assistantSpeaker) {
+                return prev.map((m, i) =>
+                  i === idx
+                    ? {
+                        ...m,
+                        ...messageOptions,
+                        streaming: false,
+                        cancelled: false,
+                        cancelReason: undefined,
+                      }
+                    : m,
+                );
+              }
+            }
+            return pushIfChanged(prev, {
+              ...messageOptions,
+              cancelled: false,
+              cancelReason: undefined,
+            });
+          });
+        }
+
+        const agentLabel = resolveAgentLabel(payload, assistantSpeaker);
+        if (agentLabel && agentLabel !== "System" && agentLabel !== "User") {
+          currentAgentRef.current = agentLabel;
+        }
+        appendGraphEvent({
+          kind: "message",
+          from: agentLabel || assistantSpeaker || "Assistant",
+          to: "User",
+          text: txt,
+          ts: payload.ts || payload.timestamp,
+        });
+        appendLog("🤖 Assistant responded");
+        setLastAssistantMessage(txt);
+        return;
+      }
+
+      if (
+        type === "function_call" ||
+        payload.function_call ||
+        payload.function_call_id ||
+        payload.tool_call_id
+      ) {
+        const fnName =
+          payload.function_call?.name ||
+          payload.name ||
+          payload.tool ||
+          payload.function_name ||
+          payload.tool_name ||
+          "Function";
+        const argText =
+          typeof payload.function_call?.arguments === "string"
+            ? payload.function_call.arguments.slice(0, 120)
+            : "";
+        appendGraphEvent({
+          kind: "function",
+          from: resolveAgentLabel(payload, currentAgentRef.current || "Assistant"),
+          to: fnName,
+          text: argText || payload.summary || "Function call",
+          ts: payload.ts || payload.timestamp,
+        });
+        return;
+      }
+
+      if (type === "tool_start") {
+        setMessages((prev) => [
+          ...prev,
+          {
+            speaker: "Assistant",
+            isTool: true,
+            text: `🛠️ tool ${payload.tool} started 🔄`,
+          },
+        ]);
+        appendGraphEvent({
+          kind: "tool",
+          from: resolveAgentLabel(payload, currentAgentRef.current || "Assistant"),
+          to: resolveAgentLabel(payload, currentAgentRef.current || "Assistant"),
+          tool: payload.tool,
+          text: "started",
+          ts: payload.ts || payload.timestamp,
+        });
+        appendLog(`⚙️ ${payload.tool} started`);
+        return;
+      }
+
+
+      if (type === "tool_progress") {
+        const pctNumeric = Number(payload.pct);
+        const pctText = Number.isFinite(pctNumeric)
+          ? `${pctNumeric}%`
+          : payload.pct
+          ? `${payload.pct}`
+          : "progress";
+        updateToolMessage(
+          payload.tool,
+          (message) => ({
+            ...message,
+            text: `🛠️ tool ${payload.tool} ${pctText} 🔄`,
+          }),
+          () => ({
+            speaker: "Assistant",
+            isTool: true,
+            text: `🛠️ tool ${payload.tool} ${pctText} 🔄`,
+          }),
+        );
+        appendGraphEvent({
+          kind: "tool",
+          from: resolveAgentLabel(payload, currentAgentRef.current || "Assistant"),
+          to: resolveAgentLabel(payload, currentAgentRef.current || "Assistant"),
+          tool: payload.tool,
+          text: pctText,
+          ts: payload.ts || payload.timestamp,
+        });
+        appendLog(`⚙️ ${payload.tool} ${pctText}`);
+        return;
+      }
+
+      if (type === "tool_end") {
+
+        const resultPayload =
+          payload.result ?? payload.output ?? payload.data ?? payload.response;
+        const serializedResult =
+          resultPayload !== undefined
+            ? JSON.stringify(resultPayload, null, 2)
+            : null;
+        const finalText =
+          payload.status === "success"
+            ? `🛠️ tool ${payload.tool} completed ✔️${
+                serializedResult ? `\n${serializedResult}` : ""
+              }`
+            : `🛠️ tool ${payload.tool} failed ❌\n${payload.error}`;
+        updateToolMessage(
+          payload.tool,
+          (message) => ({
+            ...message,
+            text: finalText,
+          }),
+          {
+            speaker: "Assistant",
+            isTool: true,
+            text: finalText,
+          },
+        );
+
+        const handoffTarget =
+          (resultPayload &&
+            typeof resultPayload === "object" &&
+            (resultPayload.target_agent ||
+              resultPayload.handoff_target ||
+              resultPayload.handoffTarget ||
+              resultPayload.targetAgent)) ||
+          payload.target_agent ||
+          payload.handoff_target ||
+          payload.handoffTarget;
+        if (handoffTarget) {
+          const sourceAgent = resolveAgentLabel(payload, currentAgentRef.current || "Assistant");
+          const handoffReason =
+            (resultPayload &&
+              typeof resultPayload === "object" &&
+              (resultPayload.handoff_summary ||
+                resultPayload.handoffSummary ||
+                resultPayload.message ||
+                resultPayload.reason)) ||
+            payload.summary ||
+            payload.message;
+          appendGraphEvent({
+            kind: "switch",
+            from: sourceAgent,
+            to: handoffTarget,
+            text: handoffReason || `Handoff via ${payload.tool}`,
+            ts: payload.ts || payload.timestamp,
+          });
+        }
+
+        appendGraphEvent({
+          kind: "tool",
+          from: resolveAgentLabel(payload, currentAgentRef.current || "Assistant"),
+          to: resolveAgentLabel(payload, currentAgentRef.current || "Assistant"),
+          tool: payload.tool,
+          text: payload.status || "completed",
+          detail: serializedResult || payload.error,
+          ts: payload.ts || payload.timestamp,
+        });
+        appendLog(`⚙️ ${payload.tool} ${payload.status} (${payload.elapsedMs} ms)`);
+        return;
+      }
+
+      if (type === "control") {
+        const { action } = payload;
+        logger.debug("🎮 Control message received:", action);
+
+        if (action === "tts_cancelled" || action === "audio_stop") {
+          logger.debug(`🔇 Control audio stop received (${action}) - clearing audio queue`);
+          const meta = {
+            reason: payload.reason,
+            trigger: payload.trigger,
+            at: payload.at,
+            action,
+          };
+          const event = recordBargeInEvent(action, meta);
+          interruptAssistantOutput(meta);
+          if (action === "audio_stop" && event) {
+            finalizeBargeInClear(event);
+          }
+          return;
+        }
+
+        logger.debug("🎮 Unknown control action:", action);
+        return;
+      }
+    };
+
+    handleSocketMessageRef.current = handleSocketMessage;
+
+  /* ------------------------------------------------------------------ *
+   *  OUTBOUND ACS CALL
+   * ------------------------------------------------------------------ */
+  const openRelaySocket = useCallback((targetSessionId, options = {}) => {
+    const { reason = "manual", suppressLog = false } = options;
+    if (!targetSessionId) {
+      return null;
+    }
+
+    const lifecycle = callLifecycleRef.current;
+    if (relayReconnectTimeoutRef.current && typeof window !== "undefined") {
+      window.clearTimeout(relayReconnectTimeoutRef.current);
+      relayReconnectTimeoutRef.current = null;
+    }
+    lifecycle.reconnectScheduled = false;
+
+    try {
+      const encodedSession = encodeURIComponent(targetSessionId);
+      const relayUrl = `${WS_URL}/api/v1/browser/dashboard/relay?session_id=${encodedSession}`;
+      closeRelaySocket(`${reason || "manual"} reopen`, { preserveLifecycle: true });
+      if (!suppressLog) {
+        appendLog(`Connecting relay WS (${reason})`);
+      }
+
+      const relay = new WebSocket(relayUrl);
+      relaySocketRef.current = relay;
+      lifecycle.lastRelayOpenedAt = Date.now();
+
+      relay.onopen = () => {
+        appendLog("Relay WS connected");
+        lifecycle.reconnectAttempts = 0;
+        lifecycle.reconnectScheduled = false;
+        lifecycle.stalledLoggedAt = null;
+        lifecycle.lastEnvelopeAt = Date.now();
+      };
+
+      relay.onerror = (error) => {
+        logger.error("Relay WS error:", error);
+        appendLog("Relay WS error");
+      };
+
+      relay.onmessage = ({ data }) => {
+        lifecycle.lastEnvelopeAt = Date.now();
+        try {
+          const obj = JSON.parse(data);
+          let processedObj = obj;
+
+          if (obj && obj.type && obj.sender && obj.payload && obj.ts) {
+            logger.debug("📨 Relay received envelope message:", {
+              type: obj.type,
+              sender: obj.sender,
+              topic: obj.topic,
+            });
+
+            processedObj = {
+              type: obj.type,
+              sender: obj.sender,
+              ...obj.payload,
+            };
+            logger.debug("📨 Transformed relay envelope:", processedObj);
+          }
+
+          const handler = handleSocketMessageRef.current;
+          if (handler) {
+            handler({ data: JSON.stringify(processedObj) });
+          }
+        } catch (error) {
+          logger.error("Relay parse error:", error);
+          appendLog("Relay parse error");
+        }
+      };
+
+      relay.onclose = (event) => {
+        if (relaySocketRef.current === relay) {
+          relaySocketRef.current = null;
+        }
+
+        const state = callLifecycleRef.current;
+        const pending = state.pending;
+        const code = event?.code;
+        const reasonText = event?.reason;
+
+        if (!pending) {
+          appendLog("Relay WS disconnected");
+          setCallActive(false);
+          setActiveSpeaker(null);
+          return;
+        }
+
+        const details = [code ?? "no code"];
+        if (reasonText) {
+          details.push(reasonText);
+        }
+        appendLog(`Relay WS closed (${details.join(": ")}) – scheduling retry`);
+
+        state.reconnectAttempts = Math.min(state.reconnectAttempts + 1, 6);
+        state.reconnectScheduled = true;
+
+        if (typeof window !== "undefined") {
+          const baseDelay = 800;
+          const delay = Math.min(10000, baseDelay * Math.pow(2, state.reconnectAttempts - 1));
+          if (relayReconnectTimeoutRef.current) {
+            window.clearTimeout(relayReconnectTimeoutRef.current);
+          }
+          relayReconnectTimeoutRef.current = window.setTimeout(() => {
+            relayReconnectTimeoutRef.current = null;
+            state.reconnectScheduled = false;
+            if (!callLifecycleRef.current.pending) {
+              return;
+            }
+            const opener = openRelaySocketRef.current;
+            if (opener) {
+              opener(targetSessionId, { reason: "auto-reconnect", suppressLog: true });
+            }
+          }, delay);
+        }
+      };
+
+      return relay;
+    } catch (error) {
+      logger.error("Failed to open relay websocket:", error);
+      appendLog("Relay WS open failed");
+      return null;
+    }
+  }, [appendLog, closeRelaySocket, setActiveSpeaker, setCallActive]);
+
+  openRelaySocketRef.current = openRelaySocket;
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return undefined;
+    }
+
+    const interval = window.setInterval(() => {
+      const lifecycle = callLifecycleRef.current;
+      if (!lifecycle.pending) {
+        return;
+      }
+
+      const relay = relaySocketRef.current;
+      const sessionKey = sessionId || getOrCreateSessionId();
+      const now = Date.now();
+
+      if (!relay || relay.readyState !== WebSocket.OPEN) {
+        if (!lifecycle.reconnectScheduled) {
+          lifecycle.reconnectScheduled = true;
+          lifecycle.reconnectAttempts = Math.min(lifecycle.reconnectAttempts + 1, 6);
+          const baseDelay = 800;
+          const delay = Math.min(10000, baseDelay * Math.pow(2, lifecycle.reconnectAttempts - 1));
+          if (relayReconnectTimeoutRef.current) {
+            window.clearTimeout(relayReconnectTimeoutRef.current);
+          }
+          relayReconnectTimeoutRef.current = window.setTimeout(() => {
+            relayReconnectTimeoutRef.current = null;
+            lifecycle.reconnectScheduled = false;
+            if (!callLifecycleRef.current.pending) {
+              return;
+            }
+            const opener = openRelaySocketRef.current;
+            if (opener) {
+              opener(sessionKey, { reason: "monitor-reconnect", suppressLog: true });
+            }
+          }, delay);
+        }
+        return;
+      }
+
+      lifecycle.reconnectAttempts = 0;
+
+      if (lifecycle.lastEnvelopeAt && now - lifecycle.lastEnvelopeAt > 15000) {
+        if (!lifecycle.stalledLoggedAt || now - lifecycle.stalledLoggedAt > 15000) {
+          appendLog("⚠️ No ACS updates in 15s — refreshing relay subscription.");
+          lifecycle.stalledLoggedAt = now;
+        }
+        const opener = openRelaySocketRef.current;
+        if (opener) {
+          opener(sessionKey, { reason: "envelope-timeout", suppressLog: true });
+        }
+        lifecycle.lastEnvelopeAt = Date.now();
+      }
+    }, 6000);
+
+    relayHealthIntervalRef.current = interval;
+
+    return () => {
+      if (relayHealthIntervalRef.current && typeof window !== "undefined") {
+        window.clearInterval(relayHealthIntervalRef.current);
+        relayHealthIntervalRef.current = null;
+      }
+    };
+  }, [appendLog, sessionId]);
+
+  const startACSCall = async () => {
+    if (systemStatus.status === "degraded" && systemStatus.acsOnlyIssue) {
+      appendLog("🚫 Outbound calling disabled until ACS configuration is provided.");
+      return;
+    }
+    if (!/^\+\d+$/.test(targetPhoneNumber)) {
+      alert("Enter phone in E.164 format e.g. +15551234567");
+      return;
+    }
+    try {
+      // Get the current session ID for this browser session
+      const currentSessionId = getOrCreateSessionId();
+      logger.info(
+        `📞 [FRONTEND] Initiating phone call with session_id: ${currentSessionId} (streaming_mode=${selectedStreamingMode})`,
+      );
+      logger.debug(
+        '📞 [FRONTEND] This session_id will be sent to backend for call mapping',
+      );
+
+      const res = await fetch(`${API_BASE_URL}/api/v1/calls/initiate`, {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({
+          target_number: targetPhoneNumber,
+          streaming_mode: selectedStreamingMode,
+          context: {
+            browser_session_id: currentSessionId,  // 🎯 Pass browser session ID for ACS coordination
+            streaming_mode: selectedStreamingMode,
+          }
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        appendLog(`Call error: ${json.detail||res.statusText}`);
+        resetCallLifecycle();
+        return;
+      }
+      const newCallId = json.call_id ?? json.callId ?? null;
+      setCurrentCallId(newCallId);
+      if (!newCallId) {
+        appendLog("⚠️ Call initiated but call_id missing from response");
+      }
+      // show in chat with dedicated system card
+      const readableMode = selectedStreamingModeLabel || selectedStreamingMode;
+      appendSystemMessage("📞 Call started", {
+        tone: "call",
+        statusCaption: `→ ${targetPhoneNumber} · Mode: ${readableMode}`,
+        statusLabel: "Call Initiated",
+      });
+      appendLog(`📞 Call initiated (mode: ${readableMode})`);
+      setShowPhoneInput(false);
+      const lifecycle = callLifecycleRef.current;
+      lifecycle.pending = true;
+      lifecycle.active = false;
+      lifecycle.callId = newCallId ?? null;
+      lifecycle.lastEnvelopeAt = Date.now();
+      lifecycle.reconnectAttempts = 0;
+      lifecycle.reconnectScheduled = false;
+      lifecycle.stalledLoggedAt = null;
+      lifecycle.lastRelayOpenedAt = 0;
+
+      logger.info('🔗 [FRONTEND] Starting dashboard relay WebSocket to monitor session:', currentSessionId);
+      openRelaySocket(currentSessionId, { reason: "call-start" });
+    } catch(e) {
+      appendLog(`Network error starting call: ${e.message}`);
+      resetCallLifecycle();
+    }
+  };
+
+  /* ------------------------------------------------------------------ *
+   *  RENDER
+   * ------------------------------------------------------------------ */
+  const recentTools = useMemo(
+    () => graphEvents.filter((evt) => evt.kind === "tool").slice(-5).reverse(),
+    [graphEvents],
+  );
+
+  return (
+    <div style={{ ...styles.root, maxWidth: `${chatWidth}px` }}>
+      <div style={{ ...styles.mainContainer, maxWidth: `${chatWidth}px` }}>
+        {/* Right Vertical Sidebar - Sleek Professional Design */}
+        <div style={{
+          position: 'fixed',
+          top: '50%',
+          right: '20px',
+          transform: 'translateY(-50%)',
+          zIndex: 1300,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '8px',
+          alignItems: 'center',
+          background: 'linear-gradient(145deg, rgba(32,38,41,0.94), rgba(15,20,24,0.92))',
+          padding: '12px 10px',
+          borderRadius: '20px',
+          boxShadow: '0 18px 42px rgba(0,0,0,0.46), 0 0 0 1px rgba(255,255,255,0.10), inset 0 1px 0 rgba(255,255,255,0.08)',
+          backdropFilter: 'blur(24px)',
+          WebkitBackdropFilter: 'blur(24px)',
+        }}>
+          {/* Floating scenario-confirmed bubble — above the button cluster */}
+          {scenarioConfirmed && (
+            <div
+              key={scenarioConfirmed.name + (scenarioConfirmed.startAgent || '')}
+              style={{
+                position: 'absolute',
+                bottom: 'calc(100% + 10px)',
+                right: 0,
+                zIndex: 1,
+                pointerEvents: 'none',
+                animation: 'voiceapp-scenario-flash 3.5s ease forwards',
+              }}
+            >
+              <div style={{
+                padding: '8px 14px',
+                borderRadius: '12px',
+                background: 'linear-gradient(135deg, rgba(16,185,129,0.95), rgba(5,150,105,0.92))',
+                boxShadow: '0 8px 28px rgba(16,185,129,0.35), 0 0 0 1px rgba(16,185,129,0.15)',
+                backdropFilter: 'blur(12px)',
+                color: 'var(--vsc-fg-strong)',
+                fontSize: '12px',
+                fontWeight: 600,
+                lineHeight: 1.4,
+                whiteSpace: 'nowrap',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+              }}>
+                <span style={{ fontSize: '14px' }}>✓</span>
+                <div>
+                  <div>{scenarioConfirmed.name}</div>
+                  {scenarioConfirmed.startAgent && (
+                    <div style={{ fontSize: '10px', fontWeight: 500, opacity: 0.85 }}>
+                      → {scenarioConfirmed.startAgent}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+          {/* Scenario Selector Button */}
+          <div style={{
+            paddingBottom: '8px',
+            borderBottom: '1px solid rgba(255,255,255,0.10)',
+            position: 'relative',
+            width: '100%',
+            display: 'flex',
+            justifyContent: 'center',
+          }}>
+            <button
+              type="button"
+              ref={scenarioButtonRef}
+              onClick={() => !scenarioSwitching && setShowScenarioMenu((prev) => !prev)}
+              disabled={!!scenarioSwitching}
+              title={scenarioSwitching ? `Switching to ${scenarioSwitching}…` : 'Select Industry Scenario'}
+              style={{
+                width: '40px',
+                height: '40px',
+                borderRadius: '8px',
+                border: scenarioSwitching ? '1px solid var(--vsc-border)' : '1px solid rgba(var(--vsc-accent-rgb),0.42)',
+                background: scenarioSwitching
+                  ? 'rgba(255,255,255,0.055)'
+                  : activeScenarioData?.is_custom
+                    ? 'var(--vsc-warning)'
+                    : activeScenarioKey === 'banking'
+                      ? 'var(--vsc-accent)'
+                      : 'var(--vsc-accent)',
+                color: 'var(--vsc-fg-strong)',
+                fontSize: '17px',
+                fontWeight: '800',
+                cursor: scenarioSwitching ? 'wait' : 'pointer',
+                opacity: scenarioSwitching ? 0.7 : 1,
+                transition: 'background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease, color 140ms ease',
+                boxShadow: scenarioSwitching ? 'none' : '0 8px 18px rgba(var(--vsc-accent-rgb),0.28)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                position: 'relative',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.transform = 'translateY(-1px)';
+                e.currentTarget.style.boxShadow = scenarioSwitching ? 'none' : '0 8px 18px rgba(var(--vsc-accent-rgb),0.34)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.transform = 'translateY(0)';
+                e.currentTarget.style.boxShadow = scenarioSwitching ? 'none' : '0 8px 18px rgba(var(--vsc-accent-rgb),0.28)';
+              }}
+            >
+              {scenarioSwitching ? (
+                <span style={{
+                  display: 'inline-block',
+                  width: '18px',
+                  height: '18px',
+                  border: '2px solid rgba(255,255,255,0.3)',
+                  borderTopColor: 'var(--vsc-fg-strong)',
+                  borderRadius: '50%',
+                  animation: 'voiceapp-spin 0.6s linear infinite',
+                }} />
+              ) : activeScenarioIcon}
+            </button>
+
+            {/* Scenario Selection Menu */}
+            {showScenarioMenu && !scenarioSwitching && (
+              <div
+                data-scenario-menu
+                style={{
+                position: 'absolute',
+                right: '64px',
+                top: '0',
+                background: 'rgba(37,37,38,0.98)',
+                borderRadius: '8px',
+                padding: '6px',
+                boxShadow: '0 10px 24px rgba(0,0,0,0.32)',
+                backdropFilter: 'blur(24px)',
+                WebkitBackdropFilter: 'blur(24px)',
+                border: '1px solid var(--vsc-border)',
+                minWidth: '200px',
+                zIndex: 1400,
+              }}>
+                {/* Built-in Scenarios (eagerly-loaded, always available) */}
+                {builtinScenarios.length > 0 && (
+                  <>
+                    <div style={{
+                      padding: '4px 8px 6px',
+                      fontSize: '10px',
+                      fontWeight: '600',
+                      color: 'var(--vsc-fg-muted)',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.5px',
+                    }}>
+                      Industry Templates
+                    </div>
+                    {builtinScenarios.map((template) => {
+                      const id = template.name?.toLowerCase().replace(/\s+/g, '_') || 'unknown';
+                      const icon = template.icon || '🎭';
+                      const label = template.name || 'Scenario';
+                      const isActive = Boolean(template.is_active);
+                      return (
+                        <button
+                          key={id}
+                          disabled={!!scenarioSwitching}
+                          onClick={async () => {
+                            if (scenarioSwitching) return;
+                            let templateStartAgent = template.start_agent || null;
+                            setScenarioSwitching(template.name);
+                            // Optimistically update UI before the POST completes;
+                            // capture previous state for rollback on failure.
+                            const prevState = applyScenarioOptimistically(template.name, templateStartAgent);
+                            const activationVersion = scenarioVersionRef.current;
+                            setShowScenarioMenu(false);
+
+                            // Apply industry template to session on backend
+                            try {
+                              const response = await fetch(
+                                `${API_BASE_URL}/api/v1/scenario-builder/session/${sessionId}/apply-template?template_id=${encodeURIComponent(id)}`,
+                                { method: 'POST' }
+                              );
+                              // Abort if a newer switch superseded this one
+                              if (scenarioVersionRef.current !== activationVersion) {
+                                setScenarioSwitching(null);
+                                return;
+                              }
+                              if (response.ok) {
+                                const data = await response.json();
+                                const confirmedAgent = data?.scenario?.start_agent || templateStartAgent;
+                                if (confirmedAgent && confirmedAgent !== templateStartAgent) {
+                                  // Backend returned a different start agent — update
+                                  currentAgentRef.current = confirmedAgent;
+                                  setSelectedAgentName(confirmedAgent);
+                                  setAgentInventory(prev => prev ? { ...prev, startAgent: confirmedAgent } : prev);
+                                }
+                              } else {
+                                // POST failed — roll back optimistic update
+                                scenarioVersionRef.current += 1;
+                                restoreScenarioSnapshot(prevState);
+                                appendLog(`⚠️ Failed to apply ${label} template (HTTP ${response.status})`);
+                                setScenarioSwitching(null);
+                                return;
+                              }
+                              appendLog(`${icon} Applied ${label} template to session ${sessionId}`);
+                            } catch (err) {
+                              // Network error — roll back only if still current
+                              if (scenarioVersionRef.current === activationVersion) {
+                                scenarioVersionRef.current += 1;
+                                restoreScenarioSnapshot(prevState);
+                              }
+                              appendLog(`Failed to apply template: ${err.message}`);
+                              setScenarioSwitching(null);
+                              return;
+                            }
+
+                            // POST succeeded — wait for backend propagation before
+                            // applying server state, avoiding stale override races.
+                            if (scenarioVersionRef.current !== activationVersion) {
+                              setScenarioSwitching(null);
+                              return;
+                            }
+                            scenarioVersionRef.current += 1;
+                            await pollUntilScenarioPropagated(template.name);
+                            appendLog(`${icon} Switched to ${label} for session ${sessionId}`);
+                            showScenarioConfirmation(label, currentAgentRef.current);
+
+                            if (callActive) {
+                              // ACS mode: restart the call with new scenario
+                              appendLog(`🔄 Restarting call with ${label} scenario...`);
+                              terminateACSCall();
+                              setTimeout(() => {
+                                handlePhoneButtonClick();
+                              }, 500);
+                            } else if (recording) {
+                              // Browser recording mode: reconnect WebSocket with new scenario
+                              appendLog(`🔄 Reconnecting with ${label} scenario...`);
+                              handleMicToggle(); // Stop current recording
+                              setTimeout(() => {
+                                handleMicToggle(); // Start new recording with new scenario
+                              }, 500);
+                            }
+                            setScenarioSwitching(null);
+                          }}
+                          style={{
+                            width: '100%',
+                            minHeight: '40px',
+                            padding: '0 13px',
+                            borderRadius: '8px',
+                            border: isActive ? '1px solid rgba(var(--vsc-accent-rgb),0.42)' : '1px solid transparent',
+                            background: isActive
+                              ? 'rgba(var(--vsc-accent-rgb),0.18)'
+                              : 'transparent',
+                            color: isActive ? 'var(--vsc-link)' : 'var(--vsc-fg-muted)',
+                            fontSize: '13px',
+                            fontWeight: isActive ? '800' : '700',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '10px',
+                            transition: 'background-color 140ms ease, border-color 140ms ease, color 140ms ease',
+                            textAlign: 'left',
+                          }}
+                          onMouseEnter={(e) => {
+                            if (!isActive) {
+                              e.currentTarget.style.background = 'rgba(255,255,255,0.06)';
+                              e.currentTarget.style.borderColor = 'var(--vsc-border)';
+                            }
+                          }}
+                          onMouseLeave={(e) => {
+                            if (!isActive) {
+                              e.currentTarget.style.background = 'transparent';
+                              e.currentTarget.style.borderColor = 'transparent';
+                            }
+                          }}
+                        >
+                          <span style={{ fontSize: '16px' }}>{icon}</span>
+                          <span>{label}</span>
+                          {isActive && (
+                            <span style={{ marginLeft: 'auto', fontSize: '14px', color: 'var(--vsc-link)' }}>✓</span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </>
+                )}
+
+                {/* Custom Scenarios (show only user-modified scenarios, not duplicates of industry templates) */}
+                {customScenarios.length > 0 && (
+                  <>
+                    <div style={{
+                      margin: '8px 0 4px',
+                      borderTop: '1px solid rgba(226,232,240,0.6)',
+                      paddingTop: '8px',
+                    }}>
+                      <div style={{
+                        padding: '4px 8px 6px',
+                        fontSize: '10px',
+                        fontWeight: '600',
+                        color: 'var(--vsc-warning)',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.5px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '4px',
+                      }}>
+                        <span style={{ fontSize: '12px' }}>🎭</span>
+                        Custom Scenarios ({customScenarios.length})
+                      </div>
+                    </div>
+                    {customScenarios.map((scenario, index) => {
+                      const scenarioKey = scenario.name?.toLowerCase().replace(/\s+/g, '_') || 'custom';
+                      const isActive = Boolean(scenario.is_active);
+                      const scenarioIcon = scenario.icon || '🎭';
+                      return (
+                        <button
+                          key={scenarioKey}
+                          disabled={!!scenarioSwitching}
+                          onClick={async () => {
+                            if (scenarioSwitching) return;
+                            let scenarioStartAgent = scenario.start_agent || scenario.agents?.[0] || null;
+                            setScenarioSwitching(scenario.name);
+                            // Optimistically update UI; capture previous state for rollback
+                            const prevState = applyScenarioOptimistically(scenario.name, scenarioStartAgent);
+                            const activationVersion = scenarioVersionRef.current;
+                            setShowScenarioMenu(false);
+
+                            // Set active scenario on backend (awaited Redis persist)
+                            try {
+                              const response = await fetch(
+                                `${API_BASE_URL}/api/v1/scenario-builder/session/${sessionId}/active?scenario_name=${encodeURIComponent(scenario.name)}`,
+                                { method: 'POST' }
+                              );
+                              // Abort if a newer switch superseded this one
+                              if (scenarioVersionRef.current !== activationVersion) {
+                                setScenarioSwitching(null);
+                                return;
+                              }
+                              if (response.ok) {
+                                const data = await response.json();
+                                const confirmedAgent = data.scenario?.start_agent;
+                                if (confirmedAgent && confirmedAgent !== scenarioStartAgent) {
+                                  currentAgentRef.current = confirmedAgent;
+                                  setSelectedAgentName(confirmedAgent);
+                                  setAgentInventory(prev => prev ? { ...prev, startAgent: confirmedAgent } : prev);
+                                }
+                              } else {
+                                // POST failed — evict the phantom scenario from
+                                // local state instead of blindly rolling back.
+                                // A simple rollback would restore `prevState` which
+                                // may already contain the phantom (added by the
+                                // orphan-preservation merge).  Evicting it prevents
+                                // the 404 loop.
+                                scenarioVersionRef.current += 1;
+                                if (response.status === 404) {
+                                  const ghostName = scenario.name?.toLowerCase();
+                                  setSessionScenarioConfig(prev => {
+                                    if (!prev) return prev;
+                                    const prunedCustom = (prev.custom_scenarios || []).filter(
+                                      s => s.name?.toLowerCase() !== ghostName,
+                                    );
+                                    const prunedScenarios = (prev.scenarios || []).filter(
+                                      s => s.name?.toLowerCase() !== ghostName,
+                                    );
+                                    return {
+                                      ...prev,
+                                      custom_scenarios: prunedCustom,
+                                      scenarios: prunedScenarios,
+                                      total: prunedScenarios.length,
+                                    };
+                                  });
+                                } else {
+                                  restoreScenarioSnapshot(prevState);
+                                }
+                                appendLog(`⚠️ Failed to set scenario ${scenario.name} (HTTP ${response.status})`);
+                                setScenarioSwitching(null);
+                                return;
+                              }
+                            } catch (err) {
+                              // Network error — roll back only if still current
+                              if (scenarioVersionRef.current === activationVersion) {
+                                scenarioVersionRef.current += 1;
+                                restoreScenarioSnapshot(prevState);
+                              }
+                              appendLog(`Failed to set active scenario: ${err.message}`);
+                              setScenarioSwitching(null);
+                              return;
+                            }
+
+                            // POST succeeded — wait for backend propagation before
+                            // applying server state, avoiding stale override races.
+                            if (scenarioVersionRef.current !== activationVersion) {
+                              setScenarioSwitching(null);
+                              return;
+                            }
+                            scenarioVersionRef.current += 1;
+                            await pollUntilScenarioPropagated(scenario.name);
+                            appendLog(`${scenarioIcon} Switched to Custom Scenario: ${scenario.name}`);
+                            showScenarioConfirmation(scenario.name, currentAgentRef.current);
+
+                            if (callActive) {
+                              appendLog(`🔄 Restarting call with custom scenario...`);
+                              terminateACSCall();
+                              setTimeout(() => {
+                                handlePhoneButtonClick();
+                              }, 500);
+                            } else if (recording) {
+                              appendLog(`🔄 Reconnecting with custom scenario...`);
+                              handleMicToggle();
+                              setTimeout(() => {
+                                handleMicToggle();
+                              }, 500);
+                            }
+                            setScenarioSwitching(null);
+                          }}
+                          style={{
+                            width: '100%',
+                            minHeight: '40px',
+                            padding: '0 13px',
+                            borderRadius: '8px',
+                            border: isActive ? '1px solid rgba(204,167,0,0.42)' : '1px solid transparent',
+                            background: isActive
+                              ? 'rgba(204,167,0,0.16)'
+                              : 'transparent',
+                            color: isActive ? 'var(--vsc-warning)' : 'var(--vsc-fg-muted)',
+                            fontSize: '13px',
+                            fontWeight: isActive ? '800' : '700',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '10px',
+                            transition: 'background-color 140ms ease, border-color 140ms ease, color 140ms ease',
+                            textAlign: 'left',
+                            marginBottom: index < customScenarios.length - 1 ? '4px' : 0,
+                          }}
+                          onMouseEnter={(e) => {
+                            if (!isActive) {
+                              e.currentTarget.style.background = 'rgba(255,255,255,0.06)';
+                              e.currentTarget.style.borderColor = 'var(--vsc-border)';
+                            }
+                          }}
+                          onMouseLeave={(e) => {
+                            if (!isActive) {
+                              e.currentTarget.style.background = 'transparent';
+                              e.currentTarget.style.borderColor = 'transparent';
+                            }
+                          }}
+                        >
+                          <span style={{ fontSize: '16px' }}>{scenarioIcon}</span>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                            }}>
+                              {scenario.name}
+                            </div>
+                            <div style={{
+                              fontSize: '10px',
+                              color: 'var(--vsc-fg-muted)',
+                              fontWeight: '400',
+                            }}>
+                              {scenario.agents?.length || 0} agents · {scenario.handoffs?.length || 0} handoffs
+                            </div>
+                          </div>
+                          {isActive && (
+                            <span style={{ fontSize: '14px', color: 'var(--vsc-warning)' }}>✓</span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBuilderInitialMode('scenarios');
+                    setBuilderScenarioCreateMode(true);
+                    setShowAgentScenarioBuilder(true);
+                    setShowScenarioMenu(false);
+                  }}
+                  style={{
+                    width: '100%',
+                    marginTop: customScenarios.length > 0 ? '10px' : '6px',
+                    minHeight: '40px',
+                    padding: '0 13px',
+                    borderRadius: '8px',
+                    border: '1px dashed var(--vsc-border)',
+                    background: 'rgba(var(--vsc-accent-rgb),0.12)',
+                    color: 'var(--vsc-link)',
+                    fontSize: '12px',
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '10px',
+                    transition: 'background-color 140ms ease, border-color 140ms ease, color 140ms ease',
+                    textAlign: 'left',
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = 'rgba(var(--vsc-accent-rgb),0.18)';
+                    e.currentTarget.style.borderColor = 'rgba(var(--vsc-accent-rgb),0.42)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = 'rgba(var(--vsc-accent-rgb),0.12)';
+                    e.currentTarget.style.borderColor = 'var(--vsc-border)';
+                  }}
+                >
+                  <span style={{ fontSize: '16px' }}>➕</span>
+                  <span>Create custom scenario…</span>
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Agent Builder Button — opens pre-loaded with the current active
+              agent (from the session/scenario cache) selected for editing. */}
+          <button
+            type="button"
+            onClick={() => {
+              setBuilderInitialMode('agents');
+              setBuilderScenarioCreateMode(false);
+              setLiveEditAgentName(resolvedAgentName);
+              setShowAgentScenarioBuilder(true);
+            }}
+            title={`Agent Builder${resolvedAgentName ? ` · ${resolvedAgentName}` : ''}`}
+            style={{
+              width: '40px',
+              height: '40px',
+              borderRadius: '8px',
+              border: '1px solid var(--vsc-border)',
+              background: 'rgba(255,255,255,0.06)',
+              color: 'var(--vsc-warning)',
+              fontSize: '18px',
+              cursor: 'pointer',
+              transition: 'background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease, color 140ms ease',
+              boxShadow: 'none',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.transform = 'translateY(-1px)';
+              e.currentTarget.style.boxShadow = '0 8px 18px rgba(0,0,0,0.24)';
+              e.currentTarget.style.background = 'rgba(204,167,0,0.16)';
+              e.currentTarget.style.borderColor = 'rgba(204,167,0,0.42)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.transform = 'translateY(0)';
+              e.currentTarget.style.boxShadow = 'none';
+              e.currentTarget.style.background = 'rgba(255,255,255,0.06)';
+              e.currentTarget.style.borderColor = 'var(--vsc-border)';
+            }}
+          >
+            <BuildRoundedIcon fontSize="small" />
+          </button>
+
+          {/* Live Session Settings ("shorthand") — quick VAD/voice tweaks that
+              apply to the in-progress call. VoiceLive is instant; Cascade
+              restarts the STT leg. */}
+          <div style={{ position: 'relative' }}>
+            <button
+              type="button"
+              onClick={() => toggleLiveSettings()}
+              title="Quick Tune — live audio & model settings"
+              style={{
+                width: '40px',
+                height: '40px',
+                borderRadius: '8px',
+                border: showLiveSettings ? '1px solid rgba(var(--vsc-accent-rgb),0.42)' : '1px solid var(--vsc-border)',
+                background: showLiveSettings
+                  ? 'rgba(var(--vsc-accent-rgb),0.18)'
+                  : 'rgba(255,255,255,0.06)',
+                color: 'var(--vsc-link)',
+                fontSize: '18px',
+                cursor: 'pointer',
+                transition: 'background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease, color 140ms ease',
+                boxShadow: showLiveSettings ? '0 8px 18px rgba(var(--vsc-accent-rgb),0.22)' : 'none',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.transform = 'translateY(-1px)';
+                e.currentTarget.style.boxShadow = '0 8px 18px rgba(0,0,0,0.24)';
+                e.currentTarget.style.background = showLiveSettings ? 'rgba(var(--vsc-accent-rgb),0.18)' : 'var(--vsc-input-bg)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.transform = 'translateY(0)';
+                e.currentTarget.style.boxShadow = showLiveSettings ? '0 8px 18px rgba(var(--vsc-accent-rgb),0.22)' : 'none';
+                e.currentTarget.style.background = showLiveSettings ? 'rgba(var(--vsc-accent-rgb),0.18)' : 'rgba(255,255,255,0.06)';
+              }}
+            >
+              <TuneRoundedIcon fontSize="small" />
+            </button>
+
+            {showLiveSettings && (
+              <div
+                style={{
+                  position: 'fixed',
+                  right: '84px',
+                  top: '50%',
+                  transform: 'translateY(-50%)',
+                  width: '320px',
+                  maxHeight: '88vh',
+                  overflowY: 'auto',
+                  background: 'rgba(18,24,29,0.98)',
+                  borderRadius: '8px',
+                  boxShadow: '0 10px 24px rgba(0,0,0,0.32)',
+                  border: '1px solid var(--vsc-border)',
+                  padding: '16px',
+                  zIndex: 1300,
+                }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                {(() => {
+                  const isVoiceLive = liveSettingsMode === 'voicelive';
+                  const set = (k, v) => setLiveSettings((s) => ({ ...s, [k]: v }));
+                  const base = liveBaseConfigRef.current || {};
+                  const baseModel = isVoiceLive
+                    ? (base.voicelive_model?.deployment_id || '')
+                    : (base.cascade_model?.deployment_id || base.model?.deployment_id || '');
+                  const chosenModel = isVoiceLive ? liveSettings.voicelive_model : liveSettings.cascade_model;
+                  const modelChanged = chosenModel && chosenModel !== baseModel;
+                  const baseByomModeHint = base.byom?.mode || '';
+                  const byomChangedHint = isVoiceLive && (liveSettings.byom_mode || '') !== baseByomModeHint;
+                  const modeMatchesActive = (selectedStreamingMode === 'voice_live') === isVoiceLive;
+                  // Instant only when VoiceLive is the active stream and no model/BYOM change.
+                  const willReconnect = !(isVoiceLive && modeMatchesActive) || modelChanged || byomChangedHint;
+                  // Model dropdown source:
+                  //   • Cascade → your live deployments (fallback static presets).
+                  //   • VoiceLive + BYOM ON → your live deployments (your own model).
+                  //   • VoiceLive + BYOM OFF → managed Voice Live models (pricing tiers).
+                  const byomOn = isVoiceLive && Boolean(liveSettings.byom_mode);
+                  const liveModeList = isVoiceLive ? liveModelOptions?.voicelive : liveModelOptions?.cascade;
+                  let modelPresets;
+                  let modelSourceLabel = '';
+                  let usingManaged = false;
+                  if (isVoiceLive && !byomOn) {
+                    modelPresets = MANAGED_VOICELIVE_MODELS.map((m) => m.id);
+                    modelSourceLabel = ' · managed Voice Live';
+                    usingManaged = true;
+                  } else if (liveModeList && liveModeList.length) {
+                    modelPresets = liveModeList.map((o) => o.id);
+                    modelSourceLabel = ' · connected Foundry resource';
+                  } else {
+                    modelPresets = isVoiceLive
+                      ? MANAGED_VOICELIVE_MODELS.map((m) => m.id)
+                      : CASCADE_MODEL_PRESETS;
+                    usingManaged = isVoiceLive;
+                  }
+                  // For the managed Voice Live list, suffix each option with its
+                  // pricing tier (pro/basic/lite) — matches the full Agent Builder.
+                  const managedTierById = Object.fromEntries(
+                    MANAGED_VOICELIVE_MODELS.map((m) => [m.id, m.tier]),
+                  );
+                  const modelLabelFor = (id) =>
+                    usingManaged && managedTierById[id] ? `${id} · ${managedTierById[id]}` : id;
+                  const arch = isVoiceLive ? classifyVoiceLiveArch(chosenModel) : null;
+                  const rowStyle = { marginBottom: '14px' };
+                  const labelStyle = {
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                    color: 'var(--vsc-fg)',
+                    marginBottom: '6px',
+                  };
+                  const selectStyle = {
+                    width: '100%',
+                    padding: '8px 10px',
+                    borderRadius: '8px',
+                    border: '1px solid rgba(255,255,255,0.14)',
+                    fontSize: '13px',
+                    color: 'var(--vsc-fg-strong)',
+                    background: 'rgba(255,255,255,0.07)',
+                    cursor: 'pointer',
+                  };
+                  const sectionLabel = {
+                    fontSize: '10px',
+                    fontWeight: 700,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.6px',
+                    color: 'var(--vsc-fg-muted)',
+                    margin: '4px 0 8px',
+                  };
+                  // Ensure current values appear as options even if not in presets/voice list.
+                  const modelOptions = chosenModel && !modelPresets.includes(chosenModel)
+                    ? [chosenModel, ...modelPresets]
+                    : modelPresets;
+                  const voiceOptions = (() => {
+                    const names = (liveVoices || []).map((v) => v.name);
+                    if (liveSettings.voice_name && !names.includes(liveSettings.voice_name)) {
+                      return [{ name: liveSettings.voice_name, display_name: liveSettings.voice_name }, ...(liveVoices || [])];
+                    }
+                    return liveVoices || [];
+                  })();
+                  const styleOptions = ['chat', 'friendly', 'cheerful', 'empathetic', 'assistant', 'newscast', 'customerservice'];
+                  const styleList = liveSettings.voice_style && !styleOptions.includes(liveSettings.voice_style)
+                    ? [liveSettings.voice_style, ...styleOptions]
+                    : styleOptions;
+                  return (
+                    <>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                        <TuneRoundedIcon style={{ fontSize: 18, color: 'var(--vsc-accent)' }} />
+                        <div style={{ fontSize: '13px', fontWeight: 700, color: 'var(--vsc-fg-strong)' }}>
+                          Quick Tune
+                        </div>
+                        {liveSettingsLoading && (
+                          <span style={{ fontSize: '11px', color: 'var(--vsc-fg-muted)' }}>loading…</span>
+                        )}
+                      </div>
+                      <div style={{
+                        fontSize: '11px',
+                        color: 'var(--vsc-fg-muted)',
+                        marginBottom: '12px',
+                      }}>
+                        {resolvedAgentName || 'Agent'}
+                        {(selectedStreamingMode === 'voice_live') === isVoiceLive
+                          ? ' · active mode'
+                          : ' · previewing other mode'}
+                      </div>
+
+                      {/* MODE SELECTOR — choose which settings surface to edit */}
+                      <div
+                        style={{
+                          display: 'flex',
+                          gap: '4px',
+                          padding: '4px',
+                          background: 'rgba(255,255,255,0.06)',
+                          borderRadius: '10px',
+                          marginBottom: '16px',
+                        }}
+                      >
+                        {[
+                          {
+                            key: 'cascade',
+                            label: 'Custom Speech',
+                            color: 'var(--vsc-accent)',
+                            tip: {
+                              icon: '🌐',
+                              title: 'Direct Azure Speech Services',
+                              body:
+                                'You orchestrate Azure Speech STT, the LLM, and Azure Speech TTS as separate components yourself. More moving parts, but fine-grained control over each model, voice persona, and routing.',
+                              foot: 'Both modes work — Custom Speech gives you a bit more control.',
+                            },
+                          },
+                          {
+                            key: 'voicelive',
+                            label: 'VoiceLive',
+                            color: 'var(--vsc-accent)',
+                            tip: {
+                              icon: '⚡️',
+                              title: 'Managed speech channel',
+                              body:
+                                'Azure AI Voice Live hosts the entire STT → LLM → TTS loop as one managed realtime service. Lowest latency (~200-400ms), native barge-in, minimal orchestration code.',
+                              foot: 'Both modes work — VoiceLive trades control for simplicity and speed.',
+                            },
+                          },
+                        ].map((opt) => {
+                          const selected = liveSettingsMode === opt.key;
+                          return (
+                            <div key={opt.key} style={{ flex: 1, position: 'relative' }}>
+                              <button
+                                onClick={() => setLiveSettingsMode(opt.key)}
+                                style={{
+                                  width: '100%',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  gap: '5px',
+                                  padding: '7px 8px',
+                                  borderRadius: '8px',
+                                  border: selected ? `1px solid ${opt.color}` : '1px solid transparent',
+                                  background: selected ? 'rgba(255,255,255,0.10)' : 'transparent',
+                                  color: selected ? opt.color : 'var(--vsc-fg-muted)',
+                                  fontSize: '12px',
+                                  fontWeight: selected ? 700 : 600,
+                                  cursor: 'pointer',
+                                  boxShadow: selected ? '0 8px 18px rgba(0,0,0,0.22)' : 'none',
+                                  transition: 'all 0.15s ease',
+                                }}
+                              >
+                                {selected ? '● ' : ''}{opt.label}
+                                <span
+                                  onMouseEnter={(e) => {
+                                    const r = e.currentTarget.getBoundingClientRect();
+                                    setQuickTuneTip({
+                                      key: opt.key,
+                                      tip: opt.tip,
+                                      top: r.bottom + 8,
+                                      left: r.left + r.width / 2,
+                                    });
+                                  }}
+                                  onMouseLeave={() =>
+                                    setQuickTuneTip((cur) => (cur?.key === opt.key ? null : cur))
+                                  }
+                                  onClick={(e) => e.stopPropagation()}
+                                  style={{
+                                    width: '14px',
+                                    height: '14px',
+                                    borderRadius: '999px',
+                                    border: `1px solid ${selected ? opt.color : 'var(--vsc-fg)'}`,
+                                    color: selected ? opt.color : 'var(--vsc-fg-muted)',
+                                    fontSize: '9px',
+                                    fontWeight: 700,
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    cursor: 'help',
+                                    lineHeight: 1,
+                                  }}
+                                >
+                                  i
+                                </span>
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Mode tooltip — portaled out so the popover's overflow
+                          doesn't clip it. */}
+                      {quickTuneTip && typeof document !== 'undefined' &&
+                        createPortal(
+                          <div
+                            role="tooltip"
+                            style={{
+                              position: 'fixed',
+                              top: quickTuneTip.top,
+                              left: quickTuneTip.left,
+                              transform: 'translateX(-50%)',
+                              zIndex: 2200,
+                              width: '248px',
+                              padding: '10px 12px',
+                              borderRadius: '10px',
+                              background: 'var(--vsc-editor-bg)',
+                              color: 'var(--vsc-fg)',
+                              boxShadow: '0 12px 28px rgba(15,23,42,0.35)',
+                              fontSize: '11px',
+                              lineHeight: 1.5,
+                              textAlign: 'left',
+                              pointerEvents: 'none',
+                            }}
+                          >
+                            <div
+                              style={{
+                                fontWeight: 700,
+                                color: 'var(--vsc-fg-strong)',
+                                marginBottom: '4px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '5px',
+                              }}
+                            >
+                              <span>{quickTuneTip.tip.icon}</span>
+                              {quickTuneTip.tip.title}
+                            </div>
+                            <div>{quickTuneTip.tip.body}</div>
+                            <div
+                              style={{
+                                marginTop: '7px',
+                                paddingTop: '7px',
+                                borderTop: '1px solid rgba(148,163,184,0.25)',
+                                fontStyle: 'italic',
+                                color: 'var(--vsc-fg-muted)',
+                                fontSize: '10px',
+                              }}
+                            >
+                              {quickTuneTip.tip.foot}
+                            </div>
+                          </div>,
+                          document.body,
+                        )}
+
+                      {/* How-it-works button → opens the interactive diagram */}
+                      <button
+                        type="button"
+                        onClick={() => setShowOrchestrationDiagram(true)}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px',
+                          width: '100%',
+                          margin: '0 0 16px',
+                          padding: '10px 12px',
+                          borderRadius: '10px',
+                          border: '1px solid rgba(124,58,237,0.35)',
+                          background: 'linear-gradient(135deg, rgba(var(--vsc-accent-rgb), 0.12), rgba(var(--vsc-accent-rgb), 0.16))',
+                          color: 'var(--vsc-accent)',
+                          fontSize: '12px',
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                          boxShadow: '0 1px 3px rgba(124,58,237,0.12)',
+                          transition: 'all 0.15s ease',
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.background = 'linear-gradient(135deg, rgba(var(--vsc-accent-rgb), 0.14), rgba(var(--vsc-accent-rgb), 0.18))';
+                          e.currentTarget.style.boxShadow = '0 4px 12px rgba(124,58,237,0.2)';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.background = 'linear-gradient(135deg, rgba(var(--vsc-accent-rgb), 0.12), rgba(var(--vsc-accent-rgb), 0.16))';
+                          e.currentTarget.style.boxShadow = '0 1px 3px rgba(124,58,237,0.12)';
+                        }}
+                      >
+                        <span style={{ fontSize: '15px' }}>🗺️</span>
+                        <span style={{ flex: 1, textAlign: 'left', lineHeight: 1.3 }}>
+                          See how it works
+                          <span style={{ display: 'block', fontSize: '10px', fontWeight: 500, color: 'var(--vsc-accent)', opacity: 0.85 }}>
+                            STT→LLM→TTS vs realtime · tap to explore
+                          </span>
+                        </span>
+                        <span style={{ fontSize: '14px', fontWeight: 800 }}>→</span>
+                      </button>
+
+                      {/* MODEL */}
+                      <div style={sectionLabel}>
+                        Model{modelSourceLabel}
+                      </div>
+                      <div style={rowStyle}>
+                        <select
+                          style={selectStyle}
+                          value={chosenModel || ''}
+                          onChange={(e) => set(isVoiceLive ? 'voicelive_model' : 'cascade_model', e.target.value)}
+                        >
+                          <option value="" disabled>Select model…</option>
+                          {modelOptions.map((m) => (
+                            <option key={m} value={m}>{modelLabelFor(m)}</option>
+                          ))}
+                        </select>
+                        {isVoiceLive && chosenModel && (
+                          <div style={{ fontSize: '10px', color: 'var(--vsc-fg-muted)', marginTop: '6px', lineHeight: 1.4 }}>
+                            {arch === 'native'
+                              ? '🎙️ Native speech-to-speech (lowest latency)'
+                              : '🔤 Cascaded STT→LLM→TTS inside VoiceLive'}
+                          </div>
+                        )}
+                        {isVoiceLive && chosenModel && arch === 'native' && (
+                          <div
+                            style={{
+                              marginTop: '8px',
+                              padding: '10px 12px',
+                              borderRadius: '10px',
+                              background: 'linear-gradient(135deg, rgba(204, 167, 0, 0.14), rgba(204, 167, 0, 0.18))',
+                              border: '1px solid var(--vsc-warning)',
+                              boxShadow: '0 2px 8px rgba(217,119,6,0.12)',
+                            }}
+                          >
+                            <div
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '6px',
+                                fontSize: '11px',
+                                fontWeight: 800,
+                                color: 'var(--vsc-warning)',
+                                textTransform: 'uppercase',
+                                letterSpacing: '0.4px',
+                                marginBottom: '6px',
+                              }}
+                            >
+                              <span style={{ fontSize: '13px' }}>⚠️</span>
+                              Realtime model — read before prod
+                            </div>
+                            <ul
+                              style={{
+                                margin: 0,
+                                paddingLeft: '16px',
+                                fontSize: '11px',
+                                lineHeight: 1.5,
+                                color: 'var(--vsc-warning)',
+                              }}
+                            >
+                              <li>
+                                <strong>Cannot be fine-tuned.</strong> Native speech-to-speech
+                                models don&apos;t support customization — you steer behavior with
+                                prompts and tools only.
+                              </li>
+                              <li>
+                                <strong>Pricing can be steep.</strong> Audio-in/audio-out tokens
+                                are billed at a premium versus text LLMs — watch cost at scale.
+                              </li>
+                              <li>
+                                <strong>Going to production?</strong> Stand up a robust eval
+                                framework in{' '}
+                                <a
+                                  href="https://learn.microsoft.com/azure/ai-foundry/concepts/evaluation-approach-gen-ai"
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  style={{ color: 'var(--vsc-warning)', fontWeight: 700 }}
+                                >
+                                  Azure AI Foundry
+                                </a>{' '}
+                                to benchmark these against higher-throughput, lower-cost text
+                                LLMs (cascaded STT→LLM→TTS) before committing.
+                              </li>
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* BYOM (Bring Your Own Model) — VoiceLive only */}
+                      {isVoiceLive && (
+                        <>
+                          <div style={sectionLabel}>BYOM — bring your own model</div>
+                          <div style={rowStyle}>
+                            <select
+                              style={selectStyle}
+                              value={liveSettings.byom_mode || ''}
+                              onChange={(e) => set('byom_mode', e.target.value)}
+                            >
+                              {BYOM_MODE_OPTIONS.map((m) => (
+                                <option key={m.value} value={m.value}>{m.label}</option>
+                              ))}
+                            </select>
+                            <div style={{ fontSize: '10px', color: 'var(--vsc-fg-muted)', marginTop: '6px', lineHeight: 1.4 }}>
+                              {liveSettings.byom_mode
+                                ? '✓ BYOM on — pick the deployment from the Model dropdown above (now lists your current Foundry resource). Applies on reconnect.'
+                                : 'Off = managed Voice Live model. Select a profile to use your own Foundry deployment (chosen via the Model dropdown above).'}
+                            </div>
+                          </div>
+                        </>
+                      )}
+
+                      {/* INPUT TRANSCRIPTION (VoiceLive STT) */}
+                      {isVoiceLive && (
+                        <>
+                          <div style={sectionLabel}>Input transcription (STT)</div>
+                          <div style={rowStyle}>
+                            <select
+                              style={selectStyle}
+                              value={liveSettings.transcription_model || ''}
+                              onChange={(e) => set('transcription_model', e.target.value)}
+                            >
+                              <option value="">(default)</option>
+                              {TRANSCRIPTION_MODEL_PRESETS.map((m) => (
+                                <option key={m.value} value={m.value}>{m.label}</option>
+                              ))}
+                            </select>
+                            {liveSettings.transcription_model === 'mai-transcribe-1.5' && (
+                              <div style={{ fontSize: '10px', color: 'var(--vsc-fg-muted)', marginTop: '6px', lineHeight: 1.4 }}>
+                                ⚡ MAI-Transcribe — phrase list & custom speech not supported
+                              </div>
+                            )}
+                          </div>
+                        </>
+                      )}
+
+                      {/* VOICE */}
+                      <div style={sectionLabel}>Voice (TTS)</div>
+                      <div style={rowStyle}>
+                        <select
+                          style={selectStyle}
+                          value={liveSettings.voice_name || ''}
+                          onChange={(e) => set('voice_name', e.target.value)}
+                        >
+                          <option value="">(default)</option>
+                          {voiceOptions.map((v) => (
+                            <option key={v.name} value={v.name}>
+                              {v.display_name || v.name}{v.category ? ` · ${v.category}` : ''}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div style={rowStyle}>
+                        <div style={labelStyle}><span>Style</span></div>
+                        <select
+                          style={selectStyle}
+                          value={liveSettings.voice_style || 'chat'}
+                          onChange={(e) => set('voice_style', e.target.value)}
+                        >
+                          {styleList.map((s) => (
+                            <option key={s} value={s}>{s}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div style={rowStyle}>
+                        <div style={labelStyle}>
+                          <span>Speaking rate</span>
+                          <span>{liveSettings.rate >= 0 ? '+' : ''}{Math.round(liveSettings.rate)}%</span>
+                        </div>
+                        <input
+                          type="range" min="-50" max="50" step="1"
+                          value={liveSettings.rate}
+                          onChange={(e) => set('rate', Number(e.target.value))}
+                          style={{ width: '100%' }}
+                        />
+                      </div>
+                      <div style={rowStyle}>
+                        <div style={labelStyle}>
+                          <span>Pitch</span>
+                          <span>{liveSettings.pitch >= 0 ? '+' : ''}{Math.round(liveSettings.pitch)}%</span>
+                        </div>
+                        <input
+                          type="range" min="-50" max="50" step="1"
+                          value={liveSettings.pitch}
+                          onChange={(e) => set('pitch', Number(e.target.value))}
+                          style={{ width: '100%' }}
+                        />
+                      </div>
+
+                      {/* TURN DETECTION */}
+                      <div style={sectionLabel}>{isVoiceLive ? 'Turn detection (VAD)' : 'Speech recognition (STT)'}</div>
+                      {isVoiceLive ? (
+                        <>
+                          <div style={rowStyle}>
+                            <div style={labelStyle}>
+                              <span>End-of-turn silence</span>
+                              <span>{Math.round(liveSettings.silence_duration_ms)} ms</span>
+                            </div>
+                            <input
+                              type="range" min="100" max="3000" step="50"
+                              value={liveSettings.silence_duration_ms}
+                              onChange={(e) => set('silence_duration_ms', Number(e.target.value))}
+                              style={{ width: '100%' }}
+                            />
+                          </div>
+                          <div style={rowStyle}>
+                            <div style={labelStyle}>
+                              <span>Prefix padding</span>
+                              <span>{Math.round(liveSettings.prefix_padding_ms)} ms</span>
+                            </div>
+                            <input
+                              type="range" min="0" max="1000" step="20"
+                              value={liveSettings.prefix_padding_ms}
+                              onChange={(e) => set('prefix_padding_ms', Number(e.target.value))}
+                              style={{ width: '100%' }}
+                            />
+                          </div>
+                          <div style={rowStyle}>
+                            <div style={labelStyle}>
+                              <span>VAD threshold</span>
+                              <span>{Number(liveSettings.turn_detection_threshold).toFixed(2)}</span>
+                            </div>
+                            <input
+                              type="range" min="0" max="1" step="0.05"
+                              value={liveSettings.turn_detection_threshold}
+                              onChange={(e) => set('turn_detection_threshold', Number(e.target.value))}
+                              style={{ width: '100%' }}
+                            />
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <div style={rowStyle}>
+                            <div style={labelStyle}>
+                              <span>STT silence timeout</span>
+                              <span>{Math.round(liveSettings.vad_silence_timeout_ms)} ms</span>
+                            </div>
+                            <input
+                              type="range" min="100" max="5000" step="50"
+                              value={liveSettings.vad_silence_timeout_ms}
+                              onChange={(e) => set('vad_silence_timeout_ms', Number(e.target.value))}
+                              style={{ width: '100%' }}
+                            />
+                          </div>
+                          <label style={{
+                            ...rowStyle,
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px',
+                            fontSize: '12px',
+                            fontWeight: 600,
+                            color: 'var(--vsc-fg-muted)',
+                            cursor: 'pointer',
+                          }}>
+                            <input
+                              type="checkbox"
+                              checked={liveSettings.use_semantic_segmentation}
+                              onChange={(e) => set('use_semantic_segmentation', e.target.checked)}
+                            />
+                            Semantic segmentation
+                          </label>
+                        </>
+                      )}
+
+                      <div style={{
+                        fontSize: '11px',
+                        color: willReconnect ? 'var(--vsc-warning)' : 'var(--vsc-success)',
+                        background: willReconnect ? 'rgba(245,158,11,0.1)' : 'rgba(34,197,94,0.1)',
+                        borderRadius: '8px',
+                        padding: '8px 10px',
+                        marginBottom: '12px',
+                        lineHeight: 1.4,
+                      }}>
+                        {willReconnect
+                          ? (modelChanged
+                              ? '🔄 Model change will briefly reconnect the call (context preserved).'
+                              : '🔄 Cascade applies on a quick stream reconnect (context preserved).')
+                          : '⚡ VAD & voice apply instantly — no reconnect.'}
+                      </div>
+
+                      <div style={{ display: 'flex', gap: '8px' }}>
+                        <button
+                          onClick={() => setShowLiveSettings(false)}
+                          style={{
+                            flex: 1,
+                            padding: '8px',
+                            borderRadius: '8px',
+                            border: '1px solid rgba(255,255,255,0.14)',
+                            background: 'rgba(255,255,255,0.06)',
+                            color: 'var(--vsc-fg)',
+                            fontSize: '12px',
+                            fontWeight: 600,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          onClick={applyLiveSettings}
+                          disabled={liveSettingsBusy || liveSettingsLoading}
+                          style={{
+                            flex: 1,
+                            padding: '8px',
+                            borderRadius: '8px',
+                            border: 'none',
+                            background: (liveSettingsBusy || liveSettingsLoading)
+                              ? 'var(--vsc-fg)'
+                              : 'linear-gradient(135deg, var(--vsc-accent), var(--vsc-accent))',
+                            color: 'var(--vsc-fg-strong)',
+                            fontSize: '12px',
+                            fontWeight: 700,
+                            cursor: (liveSettingsBusy || liveSettingsLoading) ? 'default' : 'pointer',
+                          }}
+                        >
+                          {liveSettingsBusy ? 'Applying…' : 'Apply'}
+                        </button>
+                      </div>
+                    </>
+                  );
+                })()}
+              </div>
+            )}
+          </div>
+
+          {/* Agent Context Button */}
+          <button
+            type="button"
+            onClick={() => setShowAgentPanel((prev) => !prev)}
+            title="Agent Context"
+            style={{
+              width: '40px',
+              height: '40px',
+              borderRadius: '8px',
+              border: showAgentPanel ? '1px solid rgba(var(--vsc-accent-rgb),0.42)' : '1px solid var(--vsc-border)',
+              background: showAgentPanel ? 'rgba(var(--vsc-accent-rgb),0.18)' : 'rgba(255,255,255,0.06)',
+              color: 'var(--vsc-link)',
+              fontSize: '18px',
+              cursor: 'pointer',
+              transition: 'background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease, color 140ms ease',
+              boxShadow: showAgentPanel ? '0 8px 18px rgba(var(--vsc-accent-rgb),0.22)' : 'none',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.transform = 'translateY(-1px)';
+              e.currentTarget.style.boxShadow = '0 8px 18px rgba(0,0,0,0.24)';
+              e.currentTarget.style.background = showAgentPanel ? 'rgba(var(--vsc-accent-rgb),0.18)' : 'var(--vsc-input-bg)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.transform = 'translateY(0)';
+              e.currentTarget.style.boxShadow = showAgentPanel ? '0 8px 18px rgba(var(--vsc-accent-rgb),0.22)' : 'none';
+              e.currentTarget.style.background = showAgentPanel ? 'rgba(var(--vsc-accent-rgb),0.18)' : 'rgba(255,255,255,0.06)';
+            }}
+          >
+            <SpeedRoundedIcon fontSize="small" />
+          </button>
+
+          {/* Divider */}
+          <div style={{
+            width: '32px',
+            height: '1px',
+            background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.14), transparent)',
+            margin: '4px 0',
+          }} />
+
+          {/* Backend Status Button */}
+          <BackendIndicator
+            url={API_BASE_URL}
+            onStatusChange={handleSystemStatus}
+            compact={true}
+          />
+
+          {/* Help Button */}
+          <HelpButton />
+        </div>
+
+        <div
+          ref={mainShellRef}
+          style={{
+            ...styles.mainShell,
+            width: `${chatWidth}px`,
+            maxWidth: `${chatWidth}px`,
+            minWidth: "900px",
+          }}
+        >
+          {/* App Header */}
+          <div style={styles.appHeader}>
+            <div style={styles.appHeaderIdentity}>
+              <div style={styles.appTitleBlock}>
+                <h1 style={styles.appTitle}>Phone Assistant</h1>
+                <p style={styles.appSubtitle}>Real-time, intelligent voice outreach for clinic recall and follow-up.</p>
+              </div>
+            </div>
+
+            <div style={{ ...styles.appHeaderFooter, alignItems: "center", gap: "16px" }}>
+              <div
+                style={{
+                  ...styles.sessionTag,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "10px",
+                  cursor: "pointer",
+                  position: "relative",
+                }}
+                onClick={() => {
+                  if (!editingSessionId) {
+                    setPendingSessionId(sessionId);
+                    setEditingSessionId(true);
+                    setSessionUpdateError(null);
+                  }
+                }}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    if (!editingSessionId) {
+                      setPendingSessionId(sessionId);
+                      setEditingSessionId(true);
+                      setSessionUpdateError(null);
+                    }
+                  }
+                }}
+              >
+                <span style={styles.sessionTagIcon}>💬</span>
+                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                    <div style={styles.sessionTagLabel}>Active Session</div>
+                    <span style={{
+                      padding: "2px 8px",
+                      borderRadius: "4px",
+                      background: activeScenarioData?.is_custom
+                        ? "rgba(245,158,11,0.1)"
+                        : activeScenarioKey === 'banking'
+                          ? "rgba(var(--vsc-accent-rgb),0.16)"
+                          : "rgba(var(--vsc-accent-rgb),0.16)",
+                      color: activeScenarioData?.is_custom
+                        ? "var(--vsc-warning)"
+                        : activeScenarioKey === 'banking'
+                          ? "var(--vsc-link)"
+                          : "var(--vsc-link)",
+                      fontSize: "10px",
+                      fontWeight: 600,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.5px",
+                    }}>
+                      {activeScenarioData?.name || activeScenarioKey || 'banking'}
+                    </span>
+                  </div>
+                  <code style={styles.sessionTagValue}>{sessionId}</code>
+                  {sessionUpdateError && !editingSessionId && (
+                    <div style={{ color: "var(--vsc-error)", fontSize: "12px" }}>
+                      {sessionUpdateError}
+                    </div>
+                  )}
+                </div>
+                {editingSessionId && (
+                  <div
+                    style={{
+                      position: "absolute",
+                      top: "calc(100% + 6px)",
+                      left: 0,
+                      background: "rgba(18,24,29,0.98)",
+                      padding: "10px",
+                      borderRadius: "12px",
+                      boxShadow: "0 18px 36px rgba(0,0,0,0.42)",
+                      border: "1px solid rgba(255,255,255,0.12)",
+                      minWidth: "260px",
+                      zIndex: 10,
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                      <input
+                        value={pendingSessionId}
+                        onChange={(e) => setPendingSessionId(e.target.value)}
+                        style={{
+                          padding: "6px 10px",
+                          borderRadius: "8px",
+                          border: "1px solid var(--vsc-border)",
+                          fontFamily: "monospace",
+                          fontSize: "13px",
+                          minWidth: "220px",
+                        }}
+                        placeholder="session_123..."
+                        autoFocus
+                      />
+                      <Button
+                        size="small"
+                        variant="contained"
+                        onClick={handleSessionIdSave}
+                        disabled={sessionUpdating}
+                        sx={{ textTransform: "none" }}
+                      >
+                        {sessionUpdating ? "Saving..." : "Save"}
+                      </Button>
+                      <Button
+                        size="small"
+                        variant="text"
+                        onClick={handleSessionIdCancel}
+                        disabled={sessionUpdating}
+                        sx={{ textTransform: "none" }}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                    {sessionUpdateError && (
+                      <div style={{ color: "var(--vsc-error)", fontSize: "12px", marginTop: "6px" }}>
+                        {sessionUpdateError}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div style={styles.appHeaderActions}>
+                {hasActiveProfile ? (
+                  <ProfileButton
+                    profile={activeSessionProfile}
+                    highlight={profileHighlight}
+                    onCreateProfile={openDemoForm}
+                    onTogglePanel={() => setShowProfilePanel((prev) => !prev)}
+                  />
+                ) : (
+                  <Button
+                    variant="contained"
+                    disableElevation
+                    startIcon={<BoltRoundedIcon fontSize="small" />}
+                    onMouseEnter={() => setCreateProfileHovered(true)}
+                    onMouseLeave={() => setCreateProfileHovered(false)}
+                    onClick={openDemoForm}
+                    sx={{
+                      ...styles.createProfileButton,
+                      ...(createProfileHovered ? styles.createProfileButtonHover : {}),
+                    }}
+                  >
+                    Create Demo Profile
+                  </Button>
+                )}
+              </div>
+            </div>
+          </div>
+
+            {/* Waveform Section */}
+            <div style={styles.waveformSection}>
+              <WaveformVisualization
+                activeSpeaker={activeSpeaker}
+                audioLevelRef={audioLevelRef}
+                outputAudioLevelRef={outputAudioLevelRef}
+              />
+              <div style={styles.sectionDivider}></div>
+            </div>
+
+            <div style={styles.mainViewRow}>
+              <div style={styles.viewContent}>
+                {mainView === "chat" && (
+                  <div style={styles.chatSection} ref={chatRef}>
+                    <div style={styles.chatSectionIndicator}></div>
+                    <div style={styles.messageContainer} ref={messageContainerRef}>
+                      {messages.map((message, index) => (
+                        <ChatBubble
+                          key={index}
+                          message={message}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {mainView === "graph" && (
+                  <div style={styles.graphFullWrapper}>
+                    <GraphCanvas events={graphEvents} currentAgent={currentAgentRef.current} isFull />
+                  </div>
+                )}
+
+                {mainView === "timeline" && (
+                  <div style={{ ...styles.graphFullWrapper, minHeight: "420px" }}>
+                    <GraphListView events={graphEvents} compact={false} fillHeight />
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Text Input - Shows above controls when recording */}
+            {recording && (
+              <TextInputBar onSend={handleSendText} />
+            )}
+
+            {/* Control Buttons - Clean 3-button layout */}
+            <ConversationControls
+              recording={recording}
+              callActive={callActive}
+              isCallDisabled={isCallDisabled}
+              scenarioSwitching={scenarioSwitching}
+              onResetSession={handleResetSession}
+              onMicToggle={handleMicToggle}
+              micMuted={micMuted}
+              onMuteToggle={handleMuteToggle}
+              onPhoneButtonClick={handlePhoneButtonClick}
+              phoneButtonRef={phoneButtonRef}
+              micButtonRef={micButtonRef}
+              mainView={mainView}
+              onMainViewChange={setMainView}
+            />
+            {/* Resize handle for chat width */}
+            <div
+              style={{
+                position: "absolute",
+                top: "0",
+                right: "-6px",
+                width: "12px",
+                height: "100%",
+                cursor: "ew-resize",
+                zIndex: 5,
+              }}
+              onMouseDown={(e) => {
+                resizeStartXRef.current = e.clientX;
+                chatWidthRef.current = chatWidth;
+                setIsResizingChat(true);
+              }}
+            />
+
+            <div style={styles.realtimeModeDock} ref={realtimePanelAnchorRef} />
+
+        {/* Phone Input Panel */}
+      {showPhoneInput && (
+        <div ref={phonePanelRef} style={styles.phoneInputSection}>
+          <div style={{ marginBottom: '8px', fontSize: '12px', color: 'var(--vsc-fg-muted)' }}>
+            {callActive ? '📞 Call in progress' : '📞 Enter your phone number to get a call'}
+          </div>
+          <AcsStreamingModeSelector
+            value={selectedStreamingMode}
+            onChange={handleStreamingModeChange}
+            disabled={callActive || isCallDisabled}
+          />
+          <div style={styles.phoneInputRow}>
+            <input
+              type="tel"
+              value={targetPhoneNumber}
+              onChange={(e) => setTargetPhoneNumber(e.target.value)}
+              placeholder="+15551234567"
+              style={styles.phoneInput}
+              disabled={callActive || isCallDisabled}
+            />
+            <button
+              onClick={callActive ? stopRecognition : startACSCall}
+              style={styles.callMeButton(callActive, isCallDisabled)}
+              title={
+                callActive
+                  ? "🔴 Hang up call"
+                  : isCallDisabled
+                    ? "Configure Azure Communication Services to enable calling"
+                    : "📞 Start phone call"
+              }
+              disabled={callActive || isCallDisabled}
+            >
+              {callActive ? "🔴 Hang Up" : "📞 Call Me"}
+            </button>
+          </div>
+        </div>
+      )}
+        {showRealtimeModePanel && typeof document !== 'undefined' &&
+          createPortal(
+            <div
+              ref={realtimePanelRef}
+              style={{
+                ...styles.realtimeModePanel,
+                top: realtimePanelCoords.top,
+                left: realtimePanelCoords.left,
+              }}
+            >
+              <RealtimeStreamingModeSelector
+                value={selectedRealtimeStreamingMode}
+                onChange={handleRealtimeStreamingModeChange}
+                disabled={recording}
+              />
+            </div>,
+            document.body,
+          )}
+        <OrchestrationDiagramModal
+          open={showOrchestrationDiagram}
+          onClose={() => setShowOrchestrationDiagram(false)}
+          initialMode={liveSettingsMode}
+        />
+        {showDemoForm && typeof document !== 'undefined' &&
+          createPortal(
+            <>
+              <div style={styles.demoFormBackdrop} onClick={closeDemoForm} />
+              <div className="demo-form-overlay" style={styles.demoFormOverlay}>
+                <TemporaryUserForm
+                  apiBaseUrl={API_BASE_URL}
+                  onClose={closeDemoForm}
+                  sessionId={sessionId}
+                  onSuccess={handleDemoCreated}
+                />
+              </div>
+            </>,
+            document.body
+          )
+        }
+      </div>
+      {showAgentsPanel && (
+        <AgentTopologyPanel
+          inventory={agentInventory}
+          activeAgent={selectedAgentName}
+          onClose={() => setShowAgentsPanel(false)}
+        />
+      )}
+    </div>
+    <ProfileDetailsPanel
+      profile={activeSessionProfile}
+      sessionId={sessionId}
+      open={showProfilePanel}
+      onClose={() => setShowProfilePanel(false)}
+    />
+    <SessionPerformancePanel
+      open={showAgentPanel}
+      onClose={() => setShowAgentPanel(false)}
+      sessionId={sessionId}
+      coreMemory={sessionCoreMemory}
+      sessionMeta={sessionMetadata}
+      sessionMetrics={sessionMetrics}
+      scenarioConfig={sessionScenarioConfig}
+    />
+    {agentUpdateToast && createPortal(
+      <Box
+        role="status"
+        aria-live="polite"
+        sx={{
+          position: 'fixed',
+          top: 20,
+          left: 20,
+          zIndex: 2000,
+          width: 360,
+          maxWidth: 'calc(100vw - 40px)',
+          p: 1.75,
+          borderRadius: '14px',
+          color: 'var(--vsc-fg)',
+          background: 'linear-gradient(135deg, rgba(30,41,59,0.98) 0%, rgba(15,23,42,0.98) 100%)',
+          border: '1px solid rgba(var(--vsc-accent-rgb),0.35)',
+          boxShadow: '0 12px 32px rgba(0,0,0,0.45)',
+          animation: 'agentToastIn 220ms ease-out',
+          '@keyframes agentToastIn': {
+            from: { opacity: 0, transform: 'translateY(-12px)' },
+            to: { opacity: 1, transform: 'translateY(0)' },
+          },
+        }}
+      >
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.75 }}>
+          <BuildRoundedIcon sx={{ fontSize: 18, color: 'var(--vsc-link)' }} />
+          <Typography sx={{ fontSize: 13, fontWeight: 700, flex: 1, letterSpacing: 0.2 }}>
+            {agentUpdateToast.action === 'created' ? 'Agent created' : 'Agent updated'}
+          </Typography>
+          <IconButton
+            size="small"
+            onClick={dismissAgentUpdateToast}
+            sx={{ color: 'rgba(230,237,243,0.6)', p: 0.25, '&:hover': { color: 'var(--vsc-fg)' } }}
+            aria-label="Dismiss"
+          >
+            <Typography component="span" sx={{ fontSize: 16, lineHeight: 1 }}>×</Typography>
+          </IconButton>
+        </Box>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, flexWrap: 'wrap', mb: 0.75 }}>
+          <Typography component="span" sx={{ fontSize: 13, fontWeight: 600, color: 'var(--vsc-fg-strong)' }}>
+            {agentUpdateToast.name}
+          </Typography>
+          <Typography
+            component="span"
+            sx={{
+              fontSize: 11,
+              fontWeight: 600,
+              px: 0.75,
+              py: 0.25,
+              borderRadius: '999px',
+              backgroundColor: 'rgba(var(--vsc-accent-rgb),0.18)',
+              border: '1px solid rgba(var(--vsc-accent-rgb),0.4)',
+              color: 'rgba(var(--vsc-accent-rgb), 0.24)',
+            }}
+          >
+            {agentUpdateToast.scenarioName}
+          </Typography>
+        </Box>
+        <Box component="ul" sx={{ m: 0, pl: 2, display: 'flex', flexDirection: 'column', gap: 0.25 }}>
+          {agentUpdateToast.changes.map((c, i) => (
+            <Typography
+              key={i}
+              component="li"
+              sx={{ fontSize: 12, color: 'rgba(230,237,243,0.85)' }}
+            >
+              {c}
+            </Typography>
+          ))}
+        </Box>
+      </Box>,
+      document.body
+    )}
+    <AgentBuilder
+      open={showAgentBuilder}
+      onClose={() => setShowAgentBuilder(false)}
+      sessionId={sessionId}
+      sessionProfile={activeSessionProfile}
+      onAgentCreated={(agentConfig) => {
+        appendLog(`✨ Dynamic agent created: ${agentConfig.name}`);
+        appendSystemMessage(`🤖 Agent "${agentConfig.name}" created and available`, {
+          tone: "success",
+          statusCaption: `Tools: ${agentConfig.tools?.length || 0} · Voice: ${agentConfig.voice?.name || 'default'}`,
+          statusLabel: "Agent Created",
+        });
+        notifyAgentUpdate(agentConfig, 'created');
+        // Note: Do NOT auto-select the created agent to prevent unintended scenario changes
+        // User can explicitly select the agent if they want to use it
+        fetchSessionAgentConfig();
+        // Refresh agent inventory to include the new session agent
+        setAgentInventory((prev) => {
+          if (!prev) return prev;
+          const existing = prev.agents?.find((a) => a.name === agentConfig.name);
+          if (existing) {
+            // Update existing agent
+            return {
+              ...prev,
+              agents: prev.agents.map((a) =>
+                a.name === agentConfig.name
+                  ? {
+                      ...a,
+                      description: agentConfig.description,
+                      tools: agentConfig.tools || [],
+                      toolCount: agentConfig.tools?.length || 0,
+                      model: agentConfig.model?.deployment_id || null,
+                      voice: agentConfig.voice?.name || null,
+                    }
+                  : a
+              ),
+            };
+          }
+          return {
+            ...prev,
+            agents: [
+              ...(prev.agents || []),
+              {
+                name: agentConfig.name,
+                description: agentConfig.description,
+                tools: agentConfig.tools || [],
+                toolCount: agentConfig.tools?.length || 0,
+                model: agentConfig.model?.deployment_id || null,
+                voice: agentConfig.voice?.name || null,
+                templateId: agentConfig.name ? agentConfig.name.toLowerCase().replace(/\s+/g, "_") : null,
+              },
+            ],
+          };
+        });
+        setShowAgentBuilder(false);
+      }}
+      onAgentUpdated={(agentConfig) => {
+        appendLog(`✏️ Dynamic agent updated: ${agentConfig.name}`);
+        appendSystemMessage(`🤖 Agent "${agentConfig.name}" updated`, {
+          tone: "success",
+          statusCaption: `Tools: ${agentConfig.tools?.length || 0} · Voice: ${agentConfig.voice?.name || 'default'}`,
+          statusLabel: "Agent Updated",
+        });
+        notifyAgentUpdate(agentConfig, 'updated');
+        // Update the agent in inventory
+        setAgentInventory((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            agents: prev.agents.map((a) =>
+              a.name === agentConfig.name
+                ? {
+                    ...a,
+                    description: agentConfig.description,
+                    tools: agentConfig.tools || [],
+                    toolCount: agentConfig.tools?.length || 0,
+                    model: agentConfig.model?.deployment_id || null,
+                    voice: agentConfig.voice?.name || null,
+                    templateId: agentConfig.name
+                      ? agentConfig.name.toLowerCase().replace(/\s+/g, "_")
+                      : a.templateId,
+                  }
+                : a
+            ),
+          };
+        });
+        // Don't close the dialog on update - user may want to continue editing
+      }}
+    />
+    <AgentScenarioBuilder
+      open={showAgentScenarioBuilder}
+      onClose={() => { setShowAgentScenarioBuilder(false); setBuilderScenarioCreateMode(false); setLiveEditAgentName(null); }}
+      initialMode={builderInitialMode}
+      initialEditAgentName={liveEditAgentName}
+      sessionId={sessionId}
+      sessionProfile={activeSessionProfile}
+      scenarioEditMode={builderInitialMode === 'scenarios' && builderScenarioCreateMode ? false : customScenarios.length > 0}
+      existingScenarioConfig={
+        builderInitialMode === 'scenarios' && builderScenarioCreateMode
+          ? null
+          : (customScenarios.find(s => s.is_active) || customScenarios[0] || null)
+      }
+      sharedScenarioConfig={sessionScenarioConfig}
+      onRefreshScenarios={pollUntilScenarioPropagated}
+      onActivateScenario={activateScenarioFromBuilder}
+      onAgentCreated={(agentConfig) => {
+        appendLog(`✨ Dynamic agent created: ${agentConfig.name}`);
+        appendSystemMessage(`🤖 Agent "${agentConfig.name}" created and available`, {
+          tone: "success",
+          statusCaption: `Tools: ${agentConfig.tools?.length || 0} · Voice: ${agentConfig.voice?.name || 'default'}`,
+          statusLabel: "Agent Created",
+        });
+        notifyAgentUpdate(agentConfig, 'created');
+        // Note: Do NOT auto-select the created agent to prevent unintended scenario changes
+        // User can explicitly select the agent if they want to use it
+        fetchSessionAgentConfig();
+        setAgentInventory((prev) => {
+          if (!prev) return prev;
+          const existing = prev.agents?.find((a) => a.name === agentConfig.name);
+          if (existing) {
+            return {
+              ...prev,
+              agents: prev.agents.map((a) =>
+                a.name === agentConfig.name
+                  ? {
+                      ...a,
+                      description: agentConfig.description,
+                      tools: agentConfig.tools || [],
+                      toolCount: agentConfig.tools?.length || 0,
+                      model: agentConfig.model?.deployment_id || null,
+                      voice: agentConfig.voice?.name || null,
+                    }
+                  : a
+              ),
+            };
+          }
+          return {
+            ...prev,
+            agents: [
+              ...(prev.agents || []),
+              {
+                name: agentConfig.name,
+                description: agentConfig.description,
+                tools: agentConfig.tools || [],
+                toolCount: agentConfig.tools?.length || 0,
+                model: agentConfig.model?.deployment_id || null,
+                voice: agentConfig.voice?.name || null,
+                templateId: agentConfig.name ? agentConfig.name.toLowerCase().replace(/\s+/g, "_") : null,
+              },
+            ],
+          };
+        });
+      }}
+      onAgentUpdated={(agentConfig) => {
+        appendLog(`✏️ Dynamic agent updated: ${agentConfig.name}`);
+        appendSystemMessage(`🤖 Agent "${agentConfig.name}" updated`, {
+          tone: "success",
+          statusCaption: `Tools: ${agentConfig.tools?.length || 0} · Voice: ${agentConfig.voice?.name || 'default'}`,
+          statusLabel: "Agent Updated",
+        });
+        notifyAgentUpdate(agentConfig, 'updated');
+        setAgentInventory((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            agents: prev.agents.map((a) =>
+              a.name === agentConfig.name
+                ? {
+                    ...a,
+                    description: agentConfig.description,
+                    tools: agentConfig.tools || [],
+                    toolCount: agentConfig.tools?.length || 0,
+                    model: agentConfig.model?.deployment_id || null,
+                    voice: agentConfig.voice?.name || null,
+                    templateId: agentConfig.name
+                      ? agentConfig.name.toLowerCase().replace(/\s+/g, "_")
+                      : a.templateId,
+                  }
+                : a
+            ),
+          };
+        });
+
+        // Live-agent quick edit: if this edit was launched from the "Edit live
+        // agent" action and a call/stream is currently active, end it and
+        // reinitiate from the client so the backend re-resolves the edited
+        // agent (model/voice/prompt) at reconnect. Mirrors the scenario-switch
+        // restart flow. Snapshots are read fresh from render scope.
+        if (liveEditAgentName) {
+          const wasCallActive = callActive;
+          const wasRecording = recording;
+          setLiveEditAgentName(null);
+          setShowAgentScenarioBuilder(false);
+          if (wasCallActive) {
+            appendLog(`🔄 Restarting call to apply edited agent "${agentConfig.name}"…`);
+            terminateACSCall();
+            setTimeout(() => {
+              handlePhoneButtonClick();
+            }, 600);
+          } else if (wasRecording) {
+            appendLog(`🔄 Reconnecting stream to apply edited agent "${agentConfig.name}"…`);
+            handleMicToggle();
+            setTimeout(() => {
+              handleMicToggle();
+            }, 600);
+          }
+        }
+      }}
+      onScenarioCreated={async (scenarioConfig) => {
+        appendLog(`🎭 Scenario created: ${scenarioConfig.name || 'Custom Scenario'}`);
+        appendSystemMessage(`🎭 Scenario "${scenarioConfig.name || 'Custom'}" is now active`, {
+          tone: "success",
+          statusCaption: `Agents: ${scenarioConfig.agents?.length || 0} · Handoffs: ${scenarioConfig.handoffs?.length || 0}`,
+          statusLabel: "Scenario Active",
+        });
+        // Pass the full scenarioConfig so applyScenarioOptimistically can
+        // upsert it into custom_scenarios (it's brand-new, not in any array yet).
+        applyScenarioOptimistically(scenarioConfig, scenarioConfig.start_agent);
+      }}
+      onScenarioUpdated={async (scenarioConfig) => {
+        appendLog(`✏️ Scenario updated: ${scenarioConfig.name || 'Custom Scenario'}`);
+        appendSystemMessage(`🎭 Scenario "${scenarioConfig.name || 'Custom'}" updated`, {
+          tone: "success",
+          statusCaption: `Agents: ${scenarioConfig.agents?.length || 0} · Handoffs: ${scenarioConfig.handoffs?.length || 0}`,
+          statusLabel: "Scenario Updated",
+        });
+        // Pass the full scenarioConfig so applyScenarioOptimistically can
+        // upsert or update the entry in custom_scenarios.
+        applyScenarioOptimistically(scenarioConfig, scenarioConfig.start_agent);
+      }}
+    />
+
+    {/* Session Selector */}
+    <SessionSelector
+      onSessionChange={(newSessionId, sessionDetails) => {
+        if (newSessionId) {
+          appendLog(`🔄 Switched to session: ${newSessionId}`);
+          appendSystemMessage(`📂 Session loaded: ${newSessionId.replace('session_', '')}`, {
+            tone: "info",
+            statusLabel: "Session Loaded",
+            statusCaption: sessionDetails ?
+              `Agents: ${sessionDetails.agents?.length || 0} • Scenarios: ${sessionDetails.scenarios?.length || 0}` :
+              undefined,
+          });
+
+          // Refresh session data
+          const sessionData = buildSessionProfile(null, newSessionId, activeSessionProfile);
+          if (sessionData && sessionData.sessionId === newSessionId) {
+            setSessionProfiles((prev) => ({
+              ...prev,
+              [newSessionId]: sessionData,
+            }));
+          }
+
+          // Reset UI state for new session
+          setMessages([]);
+          setGraphEvents([]);
+          setAgentInventory(null);
+          // Clear scenario state BEFORE fetching to prevent old session's
+          // custom scenarios from bleeding into the new session via the
+          // orphan-preservation merge in fetchSessionScenarioConfig.
+          setSessionScenarioConfig(null);
+          scenarioVersionRef.current += 1;
+
+          // Fetch new session data
+          fetchSessionAgentConfig(newSessionId);
+          fetchSessionScenarioConfig(newSessionId);
+        }
+      }}
+    />
+  </div>
+);
+}
+
+// Main App component wrapper
+function App() {
+  return <RealTimeVoiceApp />;
+}
+
+export default App;

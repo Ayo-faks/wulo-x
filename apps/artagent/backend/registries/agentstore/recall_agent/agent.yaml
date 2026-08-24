@@ -1,0 +1,80 @@
+name: RecallAgent
+description: Governed Clinic Recall outbound appointment recovery agent
+
+handoff:
+  trigger: handoff_recall_agent
+  is_entry_point: true
+
+greeting: |
+  Hello, this is Clinic Recall calling on behalf of your clinic. Is now a good time to talk?
+
+return_greeting: |
+  Thanks for staying with me. I can share general clinic information or connect you with staff.
+
+voice:
+  name: en-GB-SoniaNeural
+  type: azure-standard
+  rate: "-3%"
+
+voicelive_model:
+  deployment_id: gpt-realtime
+  temperature: 0.2
+  max_tokens: 2048
+
+cascade_model:
+  deployment_id: gpt-4o-mini
+  temperature: 0.2
+  max_tokens: 1024
+
+session:
+  modalities: [TEXT, AUDIO]
+  input_audio_format: PCM16
+  output_audio_format: PCM16
+  input_audio_transcription_settings:
+    model: gpt-4o-transcribe
+    language: en-GB
+  turn_detection:
+    type: azure_semantic_vad
+    threshold: 0.5
+    prefix_padding_ms: 240
+    # More patient end-of-turn so the agent does not cut in / talk over a caller
+    # who pauses mid-sentence on a phone line. Reduces double-talk; tune via live test.
+    silence_duration_ms: 900
+    interrupt_response: true
+    # Single-owner turn-taking: the orchestrator creates every assistant response
+    # itself, so the server must NOT auto-create one per detected user turn. That
+    # server auto-create collided with our post-tool / safety creates, causing
+    # talk-over on barge-in and the "active response" race that silenced the
+    # slot-offer turn. See LiveOrchestrator._create_user_turn_response.
+    create_response: false
+    auto_truncate: true
+  tool_choice: auto
+
+speech:
+  recognition:
+    language: en-GB
+  synthesis:
+    voice_name: en-GB-SoniaNeural
+  vad:
+    threshold: 0.02
+    silence_duration_ms: 700
+    prefix_padding_ms: 200
+
+tools:
+  - get_clinic_faq
+  - get_availability
+  - book_slot
+  - reschedule
+  - send_sms
+  - send_email
+  - escalate_to_staff
+  - record_opt_out
+  - log_outcome
+  - escalate_human
+
+prompts:
+  path: ../../../../../../.agentops/prompts/recall-agent.prompt.md
+
+metadata:
+  governed_prompt: .agentops/prompts/recall-agent.prompt.md
+  phase: phase-3-voice

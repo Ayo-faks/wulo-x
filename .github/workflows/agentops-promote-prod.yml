@@ -1,0 +1,496 @@
+# AgentOps - Promote Foundry prompt agent to PROD
+#
+# agentops:deploy-mode=prompt-agent
+#
+# Promotion path: merge to main -> AgentOps Deploy (DEV) gate passes ->
+# a human triggers this workflow -> GitHub `prod` environment protection
+# (required reviewers) approves -> candidate is staged and gated against
+# the SEPARATE production Foundry project before being recorded.
+#
+# All Azure/Foundry endpoints come from `prod` environment vars, so this
+# never touches staging/dev Foundry state. The prod OIDC federated
+# credential subject must match repo:<owner>/<repo>:environment:prod,
+# and azd auth login runs separately from azure/login (distinct stores).
+
+name: AgentOps Promote (PROD)
+
+on:
+  workflow_dispatch:
+    inputs:
+      authorization:
+        description: "Exact PR-15 F2 production-dark authorization phrase"
+        required: true
+        type: string
+      config:
+        description: "Path to agentops.yaml (defaults to ./agentops.yaml at repo root)"
+        required: false
+        default: "agentops.yaml"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: agentops-promote-prod-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  stage-candidate:
+    name: Stage Foundry prompt candidate (PROD)
+    runs-on: ubuntu-latest
+    environment: prod
+    timeout-minutes: 20
+    steps:
+      - name: Verify PR-15 F2 authorization
+        env:
+          AUTHORIZATION: ${{ inputs.authorization }}
+        run: |
+          expected='AUTHORIZE PR-15 F2 PRODUCTION DARK: REVIEWED PLAN/APPLY, DEPLOY, MIGRATION, PRODUCTION TEST IDENTITIES, AGENT PROMOTION, ALERT/KILL/ROLLBACK REHEARSAL; LIMIT 0 AND ALL PATIENT SWITCHES FALSE'
+          if [[ "$AUTHORIZATION" != "$expected" ]]; then
+            echo "Exact PR-15 F2 authorization is required." >&2
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: false
+
+      - name: Install AgentOps Toolkit
+        run: |
+          uv pip install --system "agentops-accelerator[foundry,agent]==0.5.2"
+
+      - name: Create candidate agent version from prompt_file
+        env:
+          AZURE_AI_FOUNDRY_PROJECT_ENDPOINT: ${{ vars.AZURE_AI_FOUNDRY_PROJECT_ENDPOINT }}
+          AGENTOPS_AGENT_PROMPT_FILE: ${{ vars.AGENTOPS_AGENT_PROMPT_FILE || '' }}
+        run: |
+          python -m agentops.pipeline.prompt_deploy stage \
+            --config "${{ inputs.config || 'agentops.yaml' }}" \
+            --environment "prod" \
+            --out ".agentops/deployments/foundry-agent.json" \
+            --eval-config ".agentops/deployments/agentops.candidate.yaml"
+
+      - name: Upload candidate deployment record
+        uses: actions/upload-artifact@v7
+        with:
+          name: foundry-agent-prod-candidate
+          path: |
+            .agentops/deployments/foundry-agent.json
+            .agentops/deployments/agentops.candidate.yaml
+          if-no-files-found: error
+
+  eval:
+    name: Eval candidate (gate)
+    needs: stage-candidate
+    runs-on: ubuntu-latest
+    environment: prod
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download candidate deployment record
+        uses: actions/download-artifact@v7
+        with:
+          name: foundry-agent-prod-candidate
+          path: .agentops/deployments
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: false
+
+      - name: Install AgentOps Toolkit
+        run: |
+          uv pip install --system "agentops-accelerator[foundry,agent]==0.5.2"
+
+      - name: Set up Azure Developer CLI
+        uses: Azure/setup-azd@v2
+
+      - name: Install pinned azd AI agents extension
+        env:
+          AGENTOPS_AZD_AI_AGENTS_EXTENSION_VERSION: "0.1.41-preview"
+        run: |
+          azd extension install azure.ai.agents --version "$AGENTOPS_AZD_AI_AGENTS_EXTENSION_VERSION"
+
+      - name: azd login (OIDC)
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        run: |
+          azd auth login \
+            --client-id "$AZURE_CLIENT_ID" \
+            --federated-credential-provider "github" \
+            --tenant-id "$AZURE_TENANT_ID"
+
+      - name: Normalize candidate + recipe paths (agentops 0.5.2 staging workaround)
+        run: |
+          python - <<'PY'
+          import json, os, yaml
+
+          def absify(v, base=None):
+              if isinstance(v, str) and v and not os.path.isabs(v):
+                  return os.path.abspath(os.path.join(base or os.curdir, v))
+              return v
+
+          def split_agent_ref(v):
+              if isinstance(v, str) and ":" in v:
+                  name, version = v.rsplit(":", 1)
+                  if name and version:
+                      return name, version
+              return None, None
+
+          def load_candidate_agent_ref(cand):
+              record_path = ".agentops/deployments/foundry-agent.json"
+              if os.path.exists(record_path):
+                  with open(record_path, encoding="utf-8") as f:
+                      record = json.load(f)
+                  for key in ("foundry_agent_version_id", "candidate_agent"):
+                      name, version = split_agent_ref(record.get(key))
+                      if name and version:
+                          return name, version
+              name, version = split_agent_ref(cand.get("agent"))
+              if name and version:
+                  return name, version
+              raise RuntimeError("candidate deployment record did not include an agent version")
+
+          cand_path = ".agentops/deployments/agentops.candidate.yaml"
+          cand = yaml.safe_load(open(cand_path))
+          candidate_name, candidate_version = load_candidate_agent_ref(cand)
+          for k in ("eval_recipe", "prompt_file", "assert_path", "redteam_path"):
+              if k in cand:
+                  cand[k] = absify(cand[k])
+          if isinstance(cand.get("assert"), dict) and "config" in cand["assert"]:
+              cand["assert"]["config"] = absify(cand["assert"]["config"])
+          yaml.safe_dump(cand, open(cand_path, "w"), sort_keys=False)
+          print("normalized eval_recipe =", cand.get("eval_recipe"))
+
+          recipe_path = cand.get("eval_recipe") or "src/recall-agent/eval.yaml"
+          recipe = yaml.safe_load(open(recipe_path))
+          recipe_dir = os.path.dirname(recipe_path)
+          agent = recipe.get("agent")
+          if not isinstance(agent, dict):
+              raise RuntimeError("azd eval recipe must contain an agent mapping")
+          recipe_agent_name = str(agent.get("name") or "")
+          if recipe_agent_name and recipe_agent_name != candidate_name:
+              raise RuntimeError(
+                  f"candidate agent {candidate_name!r} does not match recipe agent {recipe_agent_name!r}"
+              )
+          agent["name"] = candidate_name
+          agent["version"] = candidate_version
+          print("pinned recipe agent =", f"{candidate_name}:{candidate_version}")
+          ds = recipe.get("dataset")
+          if isinstance(ds, dict) and ds.get("local_uri"):
+              uri = ds["local_uri"]
+              if not os.path.exists(uri):
+                  repaired = os.path.abspath(os.path.join(".agentops/azd", os.path.basename(uri)))
+                  if os.path.exists(repaired):
+                      ds["local_uri"] = repaired
+                      print("repaired dataset.local_uri =", repaired)
+                  else:
+                      print("WARNING: dataset missing at", uri, "and", repaired)
+              else:
+                  print("dataset.local_uri OK =", uri)
+          for evaluator in recipe.get("evaluators", []):
+              if isinstance(evaluator, dict) and evaluator.get("local_uri"):
+                  evaluator["local_uri"] = absify(evaluator["local_uri"], recipe_dir)
+                  print("normalized evaluator.local_uri =", evaluator["local_uri"])
+          yaml.safe_dump(recipe, open(recipe_path, "w"), sort_keys=False)
+          PY
+
+      - name: Hydrate azd environment for Foundry project context
+        env:
+          AZURE_ENV_NAME: "prod"
+          AZURE_AI_FOUNDRY_PROJECT_ENDPOINT: ${{ vars.AZURE_AI_FOUNDRY_PROJECT_ENDPOINT }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
+        run: |
+          set -euo pipefail
+          azd env select "$AZURE_ENV_NAME" 2>/dev/null || azd env new "$AZURE_ENV_NAME" --no-prompt
+          azd env set FOUNDRY_PROJECT_ENDPOINT "$AZURE_AI_FOUNDRY_PROJECT_ENDPOINT"
+          azd env set AZURE_AI_FOUNDRY_PROJECT_ENDPOINT "$AZURE_AI_FOUNDRY_PROJECT_ENDPOINT"
+          azd env set AZURE_SUBSCRIPTION_ID "$AZURE_SUBSCRIPTION_ID"
+          read -r candidate_name candidate_version candidate_key <<EOF
+          $(python - <<'PY'
+          import json, re
+
+          with open(".agentops/deployments/foundry-agent.json", encoding="utf-8") as f:
+              record = json.load(f)
+          ref = record.get("foundry_agent_version_id") or record.get("candidate_agent")
+          if not isinstance(ref, str) or ":" not in ref:
+              raise SystemExit("candidate deployment record did not include an agent version")
+          name, version = ref.rsplit(":", 1)
+          key = re.sub(r"[^A-Za-z0-9]", "_", name).upper()
+          print(name, version, key)
+          PY
+          )
+          EOF
+          azd env set "AGENT_${candidate_key}_NAME" "$candidate_name"
+          azd env set "AGENT_${candidate_key}_VERSION" "$candidate_version"
+          if [ -n "${AZURE_OPENAI_ENDPOINT:-}" ]; then
+            azd env set AZURE_OPENAI_ENDPOINT "$AZURE_OPENAI_ENDPOINT"
+          fi
+          echo "Pinned azd agent environment: AGENT_${candidate_key}_VERSION=<set>"
+          echo "Hydrated azd env '$AZURE_ENV_NAME':"
+          azd env get-values | sed -E 's/=.*/=<set>/'
+
+      - name: Bootstrap azd eval assets
+        env:
+          AZURE_ENV_NAME: "prod"
+          FOUNDRY_PROJECT_ENDPOINT: ${{ vars.AZURE_AI_FOUNDRY_PROJECT_ENDPOINT }}
+        run: |
+          set -euo pipefail
+          recipe="$(python - <<'PY'
+          import yaml
+          cand = yaml.safe_load(open('.agentops/deployments/agentops.candidate.yaml'))
+          print(cand.get('eval_recipe') or 'src/recall-agent/eval.yaml')
+          PY
+          )"
+          python .github/scripts/bootstrap-azd-eval-evaluators.py --config "$recipe"
+          echo "Custom evaluators are bootstrapped only; skipping per-run evaluator version updates."
+
+      - name: Run azd AI agent eval through AgentOps
+        id: eval
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_AI_FOUNDRY_PROJECT_ENDPOINT: ${{ vars.AZURE_AI_FOUNDRY_PROJECT_ENDPOINT }}
+          AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
+          AZURE_OPENAI_DEPLOYMENT: ${{ vars.AZURE_OPENAI_DEPLOYMENT }}
+          AZURE_OPENAI_MODEL_NAME: ${{ vars.AZURE_OPENAI_MODEL_NAME }}
+          APPLICATIONINSIGHTS_CONNECTION_STRING: ${{ secrets.APPLICATIONINSIGHTS_CONNECTION_STRING || vars.APPLICATIONINSIGHTS_CONNECTION_STRING }}
+        run: |
+          set +e
+          mkdir -p .agentops/results/latest
+          ec=1
+          for attempt in 1 2; do
+            log=".agentops/results/latest/agentops-eval-attempt-${attempt}.log"
+            agentops eval run --config ".agentops/deployments/agentops.candidate.yaml" --output ".agentops/results/latest" 2>&1 | tee "$log"
+            ec=${PIPESTATUS[0]}
+            if [ $ec -ne 1 ] || [ $attempt -eq 2 ]; then
+              break
+            fi
+            if grep -q "AzureDeveloperCLICredential: signal: killed" "$log"; then
+              echo "azd eval show credential subprocess was killed; refreshing azd auth and retrying once."
+            elif grep -Eiq "evaluator .*not found" "$log"; then
+              echo "Foundry evaluator lookup is not ready yet; refreshing azd auth and retrying once."
+            else
+              break
+            fi
+            azd auth login \
+              --client-id "$AZURE_CLIENT_ID" \
+              --federated-credential-provider "github" \
+              --tenant-id "$AZURE_TENANT_ID"
+          done
+          echo "exit_code=$ec" >> "$GITHUB_OUTPUT"
+          if [ $ec -eq 0 ]; then
+            echo "result=pass" >> "$GITHUB_OUTPUT"
+          elif [ $ec -eq 2 ]; then
+            echo "result=threshold_failed" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=error" >> "$GITHUB_OUTPUT"
+          fi
+          exit $ec
+
+      - name: Detect AgentOps governance gates
+        id: governance
+        env:
+          AGENTOPS_CONFIG: ".agentops/deployments/agentops.candidate.yaml"
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from agentops.utils.yaml import load_yaml
+
+          config = Path(os.environ["AGENTOPS_CONFIG"])
+          data = load_yaml(config) if config.exists() else {}
+          has_assert = isinstance(data, dict) and "assert" in data
+          has_redteam = isinstance(data, dict) and "redteam" in data
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as env_file:
+              env_file.write(f"AGENTOPS_HAS_ASSERT={str(has_assert).lower()}\n")
+              env_file.write(f"AGENTOPS_HAS_REDTEAM={str(has_redteam).lower()}\n")
+          print(f"ASSERT gate: {has_assert}")
+          print(f"Red Team gate: {has_redteam}")
+          PY
+
+      - name: Install AgentOps governance dependencies
+        if: env.AGENTOPS_HAS_ASSERT == 'true' || env.AGENTOPS_HAS_REDTEAM == 'true'
+        run: |
+          if [ "$AGENTOPS_HAS_ASSERT" = "true" ]; then
+            uv pip install --system assert-ai
+          fi
+          if [ "$AGENTOPS_HAS_REDTEAM" = "true" ]; then
+            uv pip install --system "azure-ai-evaluation[redteam]"
+          fi
+
+      - name: Run ASSERT gate
+        if: env.AGENTOPS_HAS_ASSERT == 'true'
+        env:
+          AZURE_API_BASE: ${{ vars.AZURE_API_BASE }}
+          AZURE_API_VERSION: ${{ vars.AZURE_API_VERSION }}
+        run: |
+          set -euo pipefail
+          export AZURE_AD_TOKEN="$(az account get-access-token --resource https://cognitiveservices.azure.com/ --query accessToken -o tsv)"
+          agentops assert run --config ".agentops/deployments/agentops.candidate.yaml"
+
+      - name: Run Red Team gate
+        if: env.AGENTOPS_HAS_REDTEAM == 'true'
+        env:
+          AZURE_AI_FOUNDRY_PROJECT_ENDPOINT: ${{ vars.AZURE_AI_FOUNDRY_PROJECT_ENDPOINT }}
+          AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
+          AZURE_OPENAI_DEPLOYMENT: ${{ vars.AZURE_OPENAI_DEPLOYMENT }}
+          AZURE_OPENAI_MODEL_NAME: ${{ vars.AZURE_OPENAI_MODEL_NAME }}
+          APPLICATIONINSIGHTS_CONNECTION_STRING: ${{ secrets.APPLICATIONINSIGHTS_CONNECTION_STRING || vars.APPLICATIONINSIGHTS_CONNECTION_STRING }}
+        run: |
+          agentops redteam run --config ".agentops/deployments/agentops.candidate.yaml"
+
+      - name: Generate release evidence
+        if: always()
+        env:
+          AZURE_AI_FOUNDRY_PROJECT_ENDPOINT: ${{ vars.AZURE_AI_FOUNDRY_PROJECT_ENDPOINT }}
+          AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
+          AZURE_OPENAI_DEPLOYMENT: ${{ vars.AZURE_OPENAI_DEPLOYMENT }}
+          APPLICATIONINSIGHTS_CONNECTION_STRING: ${{ secrets.APPLICATIONINSIGHTS_CONNECTION_STRING || vars.APPLICATIONINSIGHTS_CONNECTION_STRING }}
+        run: |
+          agentops doctor --workspace . --out .agentops/agent/report.md \
+            --severity-fail critical --evidence-pack
+
+      - name: Publish aggregate metrics to Azure Monitor
+        if: ${{ always() && vars.AZURE_MONITOR_INGESTION_ENDPOINT != '' && vars.AZURE_MONITOR_DCR_RULE_ID != '' }}
+        env:
+          AZURE_MONITOR_INGESTION_ENDPOINT: ${{ vars.AZURE_MONITOR_INGESTION_ENDPOINT }}
+          AZURE_MONITOR_DCR_RULE_ID: ${{ vars.AZURE_MONITOR_DCR_RULE_ID }}
+          AZURE_MONITOR_STREAM_NAME: ${{ vars.AZURE_MONITOR_STREAM_NAME || 'Custom-ClinicRecallMetrics' }}
+        run: |
+          set -euo pipefail
+          uv pip install --system "azure-identity>=1.15,<2" "azure-monitor-ingestion==1.0.0"
+          args=(
+            --environment prod
+            --suite recall
+            --workflow-name "$GITHUB_WORKFLOW"
+            --workflow-run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            --git-sha "$GITHUB_SHA"
+            --jsonl-out .agentops/results/monitor-metric-rows.jsonl
+          )
+          has_input=false
+          if [[ -f .agentops/results/latest/results.json ]]; then
+            args+=(--agentops-result .agentops/results/latest/results.json)
+            has_input=true
+          fi
+          if [[ -f .agentops/assert/latest.json ]]; then
+            args+=(--assert-result .agentops/assert/latest.json)
+            has_input=true
+          fi
+          if [[ -f .agentops/redteam/latest.json ]]; then
+            args+=(--red-team-result .agentops/redteam/latest.json)
+            has_input=true
+          fi
+          if [[ -f .agentops/release/latest/evidence.json ]]; then
+            args+=(--doctor-result .agentops/release/latest/evidence.json)
+            has_input=true
+          fi
+          if [[ "$has_input" != "true" ]]; then
+            echo "No aggregate evidence files were produced; skipping metric publication."
+            exit 0
+          fi
+          python devops/agentops/emit_metric_rows.py "${args[@]}"
+
+      - name: Upload AgentOps results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: agentops-prod-results
+          path: |
+            .agentops/results/latest/results.json
+            .agentops/results/latest/report.md
+            .agentops/results/latest/azd_evaluation.json
+            .agentops/results/latest/azd_stdout.log
+            .agentops/results/latest/azd_stderr.log
+            .agentops/results/monitor-metric-rows.jsonl
+            .agentops/assert/latest.json
+            .agentops/redteam/latest.json
+            .agentops/redteam/raw_summary.json
+            .agentops/agent/report.md
+            .agentops/release/latest/evidence.json
+            .agentops/release/latest/evidence.md
+          if-no-files-found: warn
+
+      - name: Step summary
+        if: always()
+        run: |
+          {
+            echo "## AgentOps Eval (PROD promotion gate)"
+            echo
+            if [ -f .agentops/results/latest/report.md ]; then
+              cat .agentops/results/latest/report.md
+            fi
+            if [ -f .agentops/release/latest/evidence.md ]; then
+              echo
+              echo "---"
+              echo
+              cat .agentops/release/latest/evidence.md
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Record Foundry prompt deploy (DEV)
+    needs: eval
+    runs-on: ubuntu-latest
+    environment: prod
+    timeout-minutes: 10
+    steps:
+      - name: Download candidate deployment record
+        uses: actions/download-artifact@v7
+        with:
+          name: foundry-agent-prod-candidate
+          path: .agentops/deployments
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install AgentOps Toolkit
+        run: |
+          python -m pip install "agentops-accelerator==0.5.2"
+
+      - name: Mark candidate as deployed
+        run: |
+          python -m agentops.pipeline.prompt_deploy summarize \
+            --deployment ".agentops/deployments/foundry-agent.json" \
+            --environment "prod"
+
+      - name: Upload Foundry deployment record
+        uses: actions/upload-artifact@v7
+        with:
+          name: foundry-agent-dev-deployment
+          path: .agentops/deployments/foundry-agent.json
+          if-no-files-found: error

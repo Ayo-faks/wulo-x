@@ -1,0 +1,33 @@
+{
+  "authority": "synthetic_contract_verified",
+  "bundle_sha256": "10f355a97de438703d54588c9eb35e6e3d6395a0a4c8dec701d17d6d24684061",
+  "created": "2026-07-26",
+  "files": {
+    "bom_valid.csv": "f6314a486aa789a18ee08ec1e16940deb6400f1f6bb648e2f476babda7b5155c",
+    "changed_variant.csv": "791010e7e5d9cf8d202af9d7726dcfa65bd04e4405d3573662b88d9471de2c9f",
+    "conflicting_patient_facts.csv": "3e38c20d2cd0c51ac63b8eb022c19b0cf4ef76ff606aea12cc54cc5b13211284",
+    "consent_matrix.csv": "b543724f9c5c426c20aaf1dc8f877aa7ee961f1d828bdec7e0ee546646e71123",
+    "control_characters.csv": "de549fb2f4c65b4747f5f2b1887ae9951f4ceedd7e657d7dc6f17b5b447be0cd",
+    "duplicate_appointment_ref.csv": "a4d8900f2cd1f40024d8eca513e207633934a4b5469e6c512d71009de7591fa4",
+    "duplicate_header.csv": "6a51525d6c14f9376e609475344dd496261e1f64b3489484a9a1c0f3bf41e199",
+    "empty.csv": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "erased_ref_same_file.csv": "b0f54f65236732441993636c1ff078008723fc2ce4670b9afd4816c4a6714f12",
+    "formula_injection.csv": "b835fbabef5bb37f0f24c8207335f63302b284a99cff6a74b2db9917e4f531a9",
+    "formula_tab_cr.csv": "8d70379e9ee40905ef4d0213ed0eb8f291af0c7f7221d858b3d63028d917b11a",
+    "header_only.csv": "bec62ddca67f7eadcd944a617d69e8d3d6f61c5bf63d940944a45163dafc79df",
+    "interior_bom.csv": "9ae49c1d8212818cb4d85ad35d39d599a7729f931b6b73ba0a5f8dae1e59f9b9",
+    "invalid_utf8.bin": "c6b562145494459b6f8f6bab1eece807bb0e7709d706a6e454453e226adcc168",
+    "invalid_values.csv": "f18422b947b4bb529390d65809bb637c4d8a5bcc53e07966de5d4e283904e0f6",
+    "malformed_quoting.csv": "b7aa712051e05a2fdabf77b6eb8ad42148d648617d34e62575d6fc107bfbb83c",
+    "missing_required_column.csv": "cb1f54882b29ef3ade23c538ff0fbbc25eac90e9f8250799acc0a0db0ab482f6",
+    "naive_timestamp.csv": "7493b052720aaef7e1368178868df53798cf287bd2eabc6ee18fdd13ee22f72e",
+    "nul_byte.csv": "d56d7d8e61cd67f3ddcf8876c3d9b31e9c26e6d8322b3750ca860d8dfd62883f",
+    "optout_conflict.csv": "4b148fb837c9b63673d2561244e27cadd72a358801e0d4ac219f2bcc00b1b6a4",
+    "row_missing_fields.csv": "dc09a13e74ba1fa90184836a25d45ad667ffdfb85cd6c6f1b06efa97112616b6",
+    "row_overflow.csv": "c4b5522689b01d42207ce1d263e960a273b41b4000fcf3b42d8e6d6341ed47fd",
+    "unknown_column.csv": "95dbf25f04c814ca397099f3692ae061b4f2c5dba5d356cef5011ebe65b7db80",
+    "valid_multi.csv": "3d4d06d9a5b4bbc32e601361e65932754c3715560d0068cbcd300fc3743fc102"
+  },
+  "namespace": "clinic-recall-pr08-controlled-csv-import",
+  "statement": "Every identity, contact value, and clinical fact in this namespace is fictional. Phones use the reserved +44 7700 9001xx-9006xx drama range; emails use the reserved .invalid TLD; no real clinic, patient, or provider data was copied."
+}

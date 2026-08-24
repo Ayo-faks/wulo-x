@@ -1,0 +1,38 @@
+{
+  "individual_appointments": [
+    {
+      "id": "950700001",
+      "appointment_type": {
+        "links": {
+          "self": "https://api.uk2.cliniko.com/v1/appointment_types/940700001"
+        }
+      },
+      "business": {
+        "links": {
+          "self": "https://api.uk2.cliniko.com/v1/businesses/920700001"
+        }
+      },
+      "patient": {
+        "links": {
+          "self": "https://api.uk2.cliniko.com/v1/patients/900700001"
+        }
+      },
+      "practitioner": {
+        "links": {
+          "self": "https://api.uk2.cliniko.com/v1/practitioners/930700001"
+        }
+      },
+      "starts_at": "2026-08-04T09:00:00Z",
+      "ends_at": "2026-08-04T09:30:00Z",
+      "cancelled_at": null,
+      "archived_at": null,
+      "deleted_at": null,
+      "updated_at": "2026-07-25T12:00:00Z",
+      "links": {
+        "self": "https://api.uk2.cliniko.com/v1/individual_appointments/950700001"
+      }
+    }
+  ],
+  "total_entries": 1,
+  "links": {}
+}

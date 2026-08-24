@@ -1,0 +1,3 @@
+appointment_source_ref,patient_source_ref,patient_name,status,start_at
+APPT-PR08-H01,	PAT-H01,Test Patient TabRef,missed,2026-06-20T09:00:00+00:00
+APPT-PR08-H02,"PAT-H02",Test Patient CrRef,missed,2026-06-20T09:00:00+00:00

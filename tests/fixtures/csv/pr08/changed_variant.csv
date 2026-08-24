@@ -1,0 +1,5 @@
+appointment_source_ref,patient_source_ref,patient_name,patient_phone,patient_email,status,start_at,value,opt_out_sms,opt_out_email,opt_out_call
+APPT-PR08-001,PAT-PR08-ERASED,Test Patient Alpha,+447700900101,alpha@clinic-test.invalid,missed,2026-06-20T09:00:00+00:00,50.00,no,no,no
+APPT-PR08-002,PAT-PR08-ERASED,Test Patient Alpha,+447700900101,alpha@clinic-test.invalid,scheduled,2026-07-01T10:30:00+01:00,,no,no,no
+APPT-PR08-003,PAT-PR08-002,Test Patient Beta,,beta@clinic-test.invalid,cancelled,2026-06-21T10:00:00Z,25.50,false,false,false
+APPT-PR08-004,PAT-PR08-003,Test Patient Gamma,+447700900103,,no_show,2026-06-22T14:00:00+00:00,,false,,

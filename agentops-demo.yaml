@@ -1,0 +1,16 @@
+version: 1
+# The demo persona is not a hosted Foundry agent — it runs inside the app as the
+# `demo` scenario with zero tools. This config exists so the ASSERT behavioural
+# suite for the public demo can run through the same gate tooling.
+agent: demo-assistant:1
+dataset: .agentops/data/demo-smoke.jsonl
+prompt_file: .agentops/prompts/demo-assistant.prompt.md
+prompt_agent_bootstrap:
+  model: gpt-4o-mini
+  description: "Public 60-second demo persona. Fictional clinic only; no tools; never books; clinical content fails closed with the safe signpost."
+
+assert_path: .agentops/assert/latest.json
+
+assert:
+  config: ./assert/demo_eval_config.yaml
+  fail_on_violations: true

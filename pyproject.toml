@@ -1,0 +1,353 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wulo-x"
+version = "0.1.0"
+description = "Governed appointment recovery and patient follow-up for clinics"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Wulo-X contributors" }
+]
+keywords = ["azure", "clinic", "appointment-recovery", "speech", "voice", "ai", "communication-services"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Communications :: Telephony",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+dependencies = [
+    # Core FastAPI microservices stack
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.5.0",
+    "pydantic[email]",
+    "pydantic-settings>=2.14.2",
+    "starlette>=1.3.1",
+    "redis>=5.0.0",
+    "redis-entraid>=1.0.0",
+    "aiohttp>=3.14.1",
+    "python-multipart>=0.0.31",
+    "pyjwt>=2.13.0",
+    # Azure services
+    "azure-cosmos>=4.5.0",
+    "azure-identity>=1.15.0",
+    "azure-storage-blob>=12.19.0",
+    "azure-cognitiveservices-speech>=1.45.0",
+    "azure-communication-callautomation>=1.4.0",
+    "azure-communication-phonenumbers>=1.4.0",
+    "azure-communication-sms",
+    "azure-communication-email",
+    "azure-communication-identity>=1.5.0",
+    "twilio>=9.8.0,<10",
+    "azure-keyvault-secrets>=4.7.0",
+    "azure-appconfiguration>=1.7.0",
+    "azure-appconfiguration-provider>=1.0.0",
+    "azure-ai-agents==1.2.0b5",
+    "azure-ai-projects>=2.0.1,<3.0",
+    "azure-ai-voicelive==1.2.0",
+    # Azure monitoring and telemetry (pinned to avoid conflicts with google-adk)
+    "azure-monitor-opentelemetry>=1.6.11",
+    "opentelemetry-api==1.37.0",
+    "opentelemetry-sdk==1.37.0",
+    "opentelemetry-semantic-conventions==0.58b0",
+    "opentelemetry-instrumentation==0.58b0",
+    "opentelemetry-instrumentation-fastapi==0.58b0",
+    "opentelemetry-instrumentation-asgi==0.58b0",
+    "opentelemetry-instrumentation-requests==0.58b0",
+    "opentelemetry-instrumentation-urllib==0.58b0",
+    "opentelemetry-instrumentation-urllib3==0.58b0",
+    # Azure + misc
+    "azure-core>=1.38.0",
+    "urllib3>=2.7.0",
+    "colorama>=0.4.6",
+    # AI and OpenAI integration
+    "openai>=1.50.0",
+    # HTTP clients
+    "httpx>=0.27.0",
+    "aiofiles>=23.0.0",
+    # Async and networking tools
+    "websockets>=12.0",
+    # Data processing and YAML configuration
+    "numpy>=1.24.0",
+    "python-dotenv>=1.0.0",
+    "python-json-logger>=2.0.0",
+    "jinja2>=3.1.0",
+    "typing-extensions>=4.8.0",
+    "langdetect>=1.0.9",
+    "pyyaml>=6.0.0",
+    # Audio processing
+    # NOTE: local microphone capture/playback deps live in the `audio` extra.
+    # Database drivers
+    "pymongo>=4.6.0",
+    # Clinic Recall data plane (Phase 1): relational store + migrations
+    "sqlalchemy>=2.0.0",
+    "alembic>=1.13.0",
+    "psycopg[binary]>=3.2.0",
+    "defusedxml>=0.7.1",
+]
+
+[project.urls]
+Documentation = "https://github.com/Ayo-faks/wulo-x#readme"
+Source = "https://github.com/Ayo-faks/wulo-x"
+Tracker = "https://github.com/Ayo-faks/wulo-x/issues"
+
+[project.optional-dependencies]
+dev = [
+    # Testing
+    "pytest>=7.4.0",
+    "pytest-asyncio",
+    "pytest-cov",
+    "anyio",
+    # Code quality
+    "black[jupyter]>=26.3.1",
+    "isort==5.9.3",
+    "flake8==3.9.2",
+    "ruff",
+    "pylint",
+    "bandit",
+    # Type checking
+    "types-requests",
+    "types-PyYAML",
+    # Docstring coverage
+    "interrogate==1.4.0",
+    # Pre-commit hooks
+    "pre-commit==2.14.0",
+    # Load testing
+    "locust>=2.20.0",
+    # Evaluation (Foundry cloud submission)
+    "azure-ai-evaluation>=1.0.0",
+    # Local utilities (not needed in Docker)
+    "tenacity>=8.5.0",
+    "backoff>=2.0.0",
+    "rapidfuzz>=3.13.0",
+    "websocket-client>=1.6.0",
+    "pyyaml-include>=1.3.0",
+    "azure-eventgrid>=4.10.0",
+]
+
+# Local audio capture/playback - requires system portaudio library
+# Install with: pip install -e ".[audio]" or ".[dev-all]"
+# On Ubuntu: apt-get install portaudio19-dev
+# On macOS: brew install portaudio
+audio = [
+    "sounddevice>=0.4.6",
+    "pyaudio>=0.2.11",
+]
+
+# Full dev environment including local audio support
+# Duplicates dev deps to avoid self-reference issues with some tools
+dev-all = [
+    # Testing
+    "pytest>=7.4.0",
+    "pytest-asyncio",
+    "pytest-cov",
+    "anyio",
+    # Code quality
+    "black[jupyter]>=26.3.1",
+    "isort==5.9.3",
+    "flake8==3.9.2",
+    "ruff",
+    "pylint",
+    "bandit",
+    # Type checking
+    "types-requests",
+    "types-PyYAML",
+    # Docstring coverage
+    "interrogate==1.4.0",
+    # Pre-commit hooks
+    "pre-commit==2.14.0",
+    # Load testing
+    "locust>=2.20.0",
+    # Evaluation (Foundry cloud submission)
+    "azure-ai-evaluation>=1.0.0",
+    # Local audio (mic capture / playback)
+    "sounddevice>=0.4.6",
+    "pyaudio>=0.2.11",
+    # Local utilities (not needed in Docker)
+    "tenacity>=8.5.0",
+    "backoff>=2.0.0",
+    "rapidfuzz>=3.13.0",
+    "websocket-client>=1.6.0",
+    "pyyaml-include>=1.3.0",
+    "azure-eventgrid>=4.10.0",
+]
+
+docs = [
+    "mkdocs>=1.6.1",
+    "mkdocs-material>=9.4.0",
+    "mkdocstrings[python]>=0.20.0",
+    "pymdown-extensions>=10.0.0",
+    "mkdocs-mermaid2-plugin>=1.2.2",
+    "neoteroi-mkdocs==1.1.3",
+    "mkdocs-mermaid-zoom>=0.1.0",
+]
+
+[project.scripts]
+wulo-x-server = "apps.artagent.backend.main:main"
+
+# =============================================================================
+# uv Configuration
+# =============================================================================
+[tool.uv]
+# uv will use [project.optional-dependencies].dev automatically with --extra dev
+constraint-dependencies = [
+    "click>=8.3.3",
+    "cryptography>=48.0.1",
+    "idna>=3.15",
+]
+
+[tool.uv.sources]
+# Use default PyPI index
+
+# =============================================================================
+# Code Formatting & Linting
+# =============================================================================
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+include = '\\.pyi?$'
+exclude = '''
+/(
+  \.git
+  | \.venv
+  | venv
+  | \.mypy_cache
+  | \.pytest_cache
+  | build
+  | dist
+  | __pycache__
+  | node_modules
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 100
+py_version = 311
+multi_line_output = 3
+# Treat these as first-party to help import sorting
+known_first_party = ["src", "apps"]
+skip = ["venv", ".venv", "build", "dist", "__pycache__", "node_modules"]
+
+[tool.ruff]
+# Linter + import sorter (kept alongside isort to support both workflows)
+line-length = 100
+target-version = "py311"
+src = ["src", "apps"]
+exclude = [
+  ".git", ".venv", "venv", "build", "dist", "__pycache__", "node_modules"
+]
+
+[tool.ruff.lint]
+# Core rule sets; rely on Black for line length
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.pylint.main]
+py-version = "3.11"
+jobs = 0
+load-plugins = []
+
+[tool.pylint.messages_control]
+# Trim noise and allow pragmatic iteration in services code
+disable = [
+  "C0114", # missing-module-docstring
+  "C0115", # missing-class-docstring
+  "C0116", # missing-function-docstring
+  "R0903", # too-few-public-methods
+  "R0801", # duplicate-code (allow initially)
+  "W0511"  # fixme
+]
+
+[tool.pylint.format]
+max-line-length = 100
+
+[tool.flake8]
+max-line-length = 100
+extend-ignore = [
+  "E203", # whitespace before ':' per Black
+  "W503"  # line break before binary operator per Black
+]
+exclude = [
+  ".git", "__pycache__", "build", "dist", ".venv", "venv", "node_modules"
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q -ra"
+asyncio_mode = "auto"
+markers = [
+  "evaluation: marks tests as evaluation tests (deselect with '-m \"not evaluation\"')",
+  "postgres: marks tests needing a live PostgreSQL DSN (CLINIC_RECALL_TEST_DSN); skipped when unavailable",
+]
+filterwarnings = [
+  "ignore::DeprecationWarning",
+  "ignore::UserWarning"
+]
+
+[tool.coverage.run]
+branch = true
+source = ["src", "apps"]
+omit = [
+  "tests/*",
+  "*/__init__.py",
+  "*/__main__.py"
+]
+
+[tool.coverage.report]
+skip_empty = true
+show_missing = true
+fail_under = 80
+exclude_lines = [
+  "pragma: no cover",
+  "if __name__ == .__main__.:",
+  "if TYPE_CHECKING:"
+]
+
+[tool.bandit]
+# Security scanner settings
+skips = ["B101"]
+targets = ["src"]
+exclude = ["tests", "venv", ".venv", "build", "dist"]
+
+[tool.interrogate]
+# Docstring coverage for public interfaces
+ignore-init-method = true
+ignore-init-module = true
+ignore-module = true
+ignore-nested-functions = true
+ignore-private = true
+ignore-property-decorators = true
+fail-under = 70
+exclude = ["tests", "venv", ".venv", "build", "dist"]
+verbosity = 0
+color = true
+
+[tool.setuptools]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*", "apps*", "utils*"]
+
+[dependency-groups]
+dev = [
+  "azure-ai-projects>=2.0.1,<3.0",
+    "ipykernel>=7.1.0",
+    "ipywidgets>=8.1.8",
+    "pandas>=2.3.3",
+]
+
+

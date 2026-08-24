@@ -1,0 +1,36 @@
+name: rebooking
+description: Clinic Recall deterministic voice rebooking flow
+icon: "CR"
+
+start_agent: RecallAgent
+
+agents:
+  - RecallAgent
+
+handoff_type: discrete
+
+generic_handoff:
+  enabled: false
+  default_type: discrete
+  share_context: true
+  require_client_id: false
+
+agent_defaults:
+  industry: "clinic-recall"
+  compliance_required: true
+  scenario_goal: |
+    Run the Clinic Recall rebooking scenario only:
+    greet, confirm identity and consent, then either record opt-out and end,
+    get real availability and offer slots, book a clear choice and confirm in writing,
+    or escalate clinical, urgent, complaint, distress, or ambiguous turns to staff.
+    Never answer clinical questions and never invent slots, prices, clinicians, or bookings.
+
+tools:
+  - get_availability
+  - book_slot
+  - reschedule
+  - send_sms
+  - send_email
+  - escalate_to_staff
+  - record_opt_out
+  - log_outcome

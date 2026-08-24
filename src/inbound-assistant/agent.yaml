@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/microsoft/AgentSchema/refs/heads/main/schemas/v1.0/ContainerAgent.yaml
+
+kind: hosted
+name: inbound-assistant
+description: Inbound clinic front-desk assistant. Appointment logistics only; clinical, urgent, complaint, safeguarding, and distress signals route to staff.
+protocols:
+  - protocol: responses
+    version: 2.0.0
+resources:
+  cpu: "0.25"
+  memory: 0.5Gi
+environment_variables:
+  - name: AZURE_AI_MODEL_DEPLOYMENT_NAME
+    value: gpt-4o-mini
+metadata:
+  prompt_file: ../../.agentops/prompts/inbound-assistant.prompt.md
+  safety_boundary: clinical-escalation-only

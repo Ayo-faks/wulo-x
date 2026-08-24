@@ -1,0 +1,110 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+requiredVersions:
+    extensions:
+        azure.ai.agents: '>=0.1.38-preview'
+name: wulo-x
+metadata:
+    template: wulo-x@0.1.0
+services:
+    cardapi-mcp:
+        project: .
+        host: containerapp
+        language: python
+        docker:
+            path: ./apps/cardapi/Dockerfile.mcp
+            context: .
+            platform: linux/amd64
+            remoteBuild: true
+    inbound-assistant:
+        project: src/inbound-assistant
+        host: azure.ai.agent
+        language: docker
+        docker:
+            path: ./Dockerfile
+            context: ../..
+            platform: linux/amd64
+            remoteBuild: true
+        config:
+            container:
+                resources:
+                    cpu: "0.5"
+                    memory: 1Gi
+            deployments:
+                - model:
+                    format: OpenAI
+                    name: gpt-4o-mini
+                    version: "2024-07-18"
+                  name: gpt-4o-mini
+                  sku:
+                    capacity: 10
+                    name: GlobalStandard
+    recall-agent:
+        project: src/recall-agent
+        host: azure.ai.agent
+        language: docker
+        docker:
+            path: ./Dockerfile
+            context: ../..
+            platform: linux/amd64
+            remoteBuild: true
+        config:
+            container:
+                resources:
+                    cpu: "0.5"
+                    memory: 1Gi
+            deployments:
+                - model:
+                    format: OpenAI
+                    name: gpt-4o-mini
+                    version: "2024-07-18"
+                  name: gpt-4o-mini
+                  sku:
+                    capacity: 10
+                    name: GlobalStandard
+    rtaudio-client:
+        project: apps/artagent/frontend
+        host: containerapp
+        language: js
+        docker:
+            path: ./Dockerfile
+            context: .
+            platform: linux/amd64
+            remoteBuild: true
+    rtaudio-server:
+        project: .
+        host: containerapp
+        language: docker
+        docker:
+            path: ./apps/artagent/backend/Dockerfile
+            context: .
+            platform: linux/amd64
+            remoteBuild: true
+infra:
+    provider: terraform
+    path: ./infra/terraform
+hooks:
+    postdeploy:
+        name: postdeploy
+        kind: sh
+        shell: sh
+        run: devops/scripts/azd/postdeploy.sh
+    postdown:
+        name: postdown
+        kind: sh
+        shell: sh
+        run: devops/scripts/azd/postdown.sh
+        continueOnError: true
+        interactive: true
+    postprovision:
+        name: postprovision
+        kind: sh
+        shell: sh
+        run: devops/scripts/azd/postprovision.sh
+        interactive: true
+    preprovision:
+        name: preprovision
+        kind: sh
+        shell: sh
+        run: devops/scripts/azd/preprovision.sh terraform
+        interactive: true

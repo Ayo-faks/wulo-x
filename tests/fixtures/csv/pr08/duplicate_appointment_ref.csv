@@ -1,0 +1,3 @@
+appointment_source_ref,patient_source_ref,patient_name,patient_phone,patient_email,status,start_at,value,consent_sms,consent_email,consent_call,opt_out_sms,opt_out_email,opt_out_call
+APPT-PR08-201,PAT-PR08-201,Test Patient Zeta,+447700900301,zeta@clinic-test.invalid,missed,2026-06-20T09:00:00+00:00,,no,no,no,no,no,no
+APPT-PR08-201,PAT-PR08-201,Test Patient Zeta,+447700900301,zeta@clinic-test.invalid,scheduled,2026-07-01T09:00:00+00:00,,no,no,no,no,no,no

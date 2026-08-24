@@ -1,0 +1,121 @@
+# voicekit — loop-engineering gates
+#
+# Two protection layers for the voicekit test kit (developed in ./voicekit,
+# pending extraction to a standalone repo):
+#
+# 1. PR/push gate (path-scoped): unit tests (incl. strictness mutation tests
+#    and contract tests against the PINNED azure-ai-voicelive) + the eval gate
+#    (paired good/bad reference agents; 0 false negatives / 0 false positives,
+#    deterministic across shuffled repeats). Red gate = no merge.
+#
+# 2. Nightly SDK drift: installs the LATEST azure-ai-voicelive and reruns the
+#    contract tests. A failure here means the upstream SDK changed a signature
+#    the fakes are pinned to — surface it as a CI failure (and a repo issue)
+#    instead of a production incident on a live call.
+
+name: voicekit gates
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "voicekit/**"
+      - ".github/workflows/voicekit-gates.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "voicekit/**"
+      - ".github/workflows/voicekit-gates.yml"
+  schedule:
+    - cron: "23 4 * * *" # nightly SDK-drift check
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: voicekit-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests-and-evals:
+    name: Unit tests + eval gate
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    defaults:
+      run:
+        working-directory: voicekit
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: false
+
+      - name: Install (pinned SDK)
+        run: |
+          uv venv --python ${{ matrix.python-version }}
+          uv pip install -e '.[dev,contract]'
+
+      - name: Unit tests (mutation + contract + behavior)
+        run: .venv/bin/python -m pytest -q
+
+      - name: Eval gate (paired reference agents, shuffled determinism)
+        run: .venv/bin/python evals/run_evals.py --repeats 20
+
+  sdk-drift:
+    name: Nightly SDK drift (latest azure-ai-voicelive)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: voicekit
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: false
+
+      - name: Install with LATEST SDK (unpinned upgrade)
+        run: |
+          uv venv --python 3.12
+          uv pip install -e '.[dev]'
+          uv pip install --upgrade 'azure-ai-voicelive[aiohttp]'
+          .venv/bin/python -c "import azure.ai.voicelive as v; print('latest SDK:', getattr(v, '__version__', '?'))"
+
+      - name: Contract tests against latest SDK
+        id: drift
+        run: .venv/bin/python -m pytest -q tests/test_contract_voicelive.py
+
+      - name: Open drift issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = "voicekit: azure-ai-voicelive signature drift detected";
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: "open", labels: "voicekit-drift",
+            });
+            if (issues.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title,
+                labels: ["voicekit-drift"],
+                body: `Nightly contract tests failed against the latest \`azure-ai-voicelive\` release.\n\n` +
+                      `An upstream signature the voicekit fakes are pinned to has changed. ` +
+                      `Update the fakes (and the wulo-x orchestrator call sites if affected) before upgrading the SDK.\n\n` +
+                      `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              });
+            }

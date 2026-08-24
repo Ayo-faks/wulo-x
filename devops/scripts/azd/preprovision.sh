@@ -1,0 +1,563 @@
+#!/bin/bash
+# ============================================================================
+# 🎯 Azure Developer CLI Pre-Provisioning Script
+# ============================================================================
+# Runs before azd provisions Azure resources. Handles:
+#   - Terraform: Remote state setup + tfvars generation
+#   - Bicep: SSL certificate configuration
+# ============================================================================
+
+set -euo pipefail
+
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly PROVIDER="${1:-}"
+
+# ============================================================================
+# Logging (unified style)
+# ============================================================================
+
+if [[ -z "${BLUE+x}" ]]; then BLUE=$'\033[0;34m'; fi
+if [[ -z "${GREEN+x}" ]]; then GREEN=$'\033[0;32m'; fi
+if [[ -z "${GREEN_BOLD+x}" ]]; then GREEN_BOLD=$'\033[1;32m'; fi
+if [[ -z "${YELLOW+x}" ]]; then YELLOW=$'\033[1;33m'; fi
+if [[ -z "${RED+x}" ]]; then RED=$'\033[0;31m'; fi
+if [[ -z "${CYAN+x}" ]]; then CYAN=$'\033[0;36m'; fi
+if [[ -z "${DIM+x}" ]]; then DIM=$'\033[2m'; fi
+if [[ -z "${NC+x}" ]]; then NC=$'\033[0m'; fi
+readonly BLUE GREEN GREEN_BOLD YELLOW RED CYAN DIM NC
+
+is_ci() {
+    [[ "${CI:-}" == "true" || "${GITHUB_ACTIONS:-}" == "true" || "${AZD_SKIP_INTERACTIVE:-}" == "true" ]]
+}
+
+log()          { printf '│ %s%s%s\n' "$DIM" "$*" "$NC"; }
+info()         { printf '│ %s%s%s\n' "$BLUE" "$*" "$NC"; }
+success()      { printf '│ %s✔%s %s\n' "$GREEN" "$NC" "$*"; }
+phase_success(){ printf '│ %s✔ %s%s\n' "$GREEN_BOLD" "$*" "$NC"; }
+warn()         { printf '│ %s⚠%s  %s\n' "$YELLOW" "$NC" "$*"; }
+fail()         { printf '│ %s✖%s %s\n' "$RED" "$NC" "$*" >&2; }
+
+header() {
+    echo ""
+    echo "╭─────────────────────────────────────────────────────────────"
+    echo "│ ${CYAN}$*${NC}"
+    echo "├─────────────────────────────────────────────────────────────"
+}
+
+footer() {
+    echo "╰─────────────────────────────────────────────────────────────"
+    echo ""
+}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+# Helper to safely get azd env value (returns empty string on error/not found)
+get_azd_env_value() {
+    local value
+    # Get only the first line to avoid capturing warning messages
+    value=$(azd env get-value "$1" 2>/dev/null | head -n1)
+    local exit_code=${PIPESTATUS[0]}
+    # Return empty if command failed or output is an error message
+    if [[ $exit_code -ne 0 ]] || [[ -z "$value" ]] || [[ "$value" == ERROR:* ]] || [[ "$value" == *"not found"* ]]; then
+        echo ""
+    else
+        echo "$value"
+    fi
+}
+
+get_deployer_identity() {
+    local name=""
+    
+    # Try git config first
+    if command -v git &>/dev/null; then
+        local git_name git_email
+        git_name=$(git config --get user.name 2>/dev/null || true)
+        git_email=$(git config --get user.email 2>/dev/null || true)
+        [[ -n "$git_name" && -n "$git_email" ]] && name="$git_name <$git_email>"
+        [[ -z "$name" && -n "$git_email" ]] && name="$git_email"
+    fi
+    
+    # Fallback to Azure CLI
+    if [[ -z "$name" ]] && command -v az &>/dev/null; then
+        name=$(az account show --query user.name -o tsv 2>/dev/null || true)
+        [[ "$name" == "None" ]] && name=""
+    fi
+    
+    echo "${name:-unknown}"
+}
+
+# Resolve location with fallback chain: env var -> env-specific tfvars -> default tfvars -> prompt.
+# Preferred order for new environments is UK, then Sweden, then another European region,
+# and US only when the preferred regions cannot support the required Azure services.
+resolve_location() {
+    local params_dir="$SCRIPT_DIR/../../../infra/terraform/params"
+    
+    # 1. Already set via environment
+    if [[ -n "${AZURE_LOCATION:-}" ]]; then
+        info "Using AZURE_LOCATION from environment: $AZURE_LOCATION"
+        # Ensure it's also in azd env for downstream scripts
+        azd env set AZURE_LOCATION "$AZURE_LOCATION" 2>/dev/null || true
+        return 0
+    fi
+    
+    # 2. Try environment-specific tfvars (e.g., main.tfvars.staging.json)
+    local env_tfvars="$params_dir/main.tfvars.${AZURE_ENV_NAME}.json"
+    if [[ -f "$env_tfvars" ]]; then
+        AZURE_LOCATION=$(jq -r '.location // empty' "$env_tfvars" 2>/dev/null || true)
+        if [[ -n "$AZURE_LOCATION" ]]; then
+            info "Resolved location from $env_tfvars: $AZURE_LOCATION"
+            export AZURE_LOCATION
+            azd env set AZURE_LOCATION "$AZURE_LOCATION"
+            return 0
+        fi
+    fi
+    
+    # 3. Try default tfvars
+    local default_tfvars="$params_dir/main.tfvars.default.json"
+    if [[ -f "$default_tfvars" ]]; then
+        AZURE_LOCATION=$(jq -r '.location // empty' "$default_tfvars" 2>/dev/null || true)
+        if [[ -n "$AZURE_LOCATION" ]]; then
+            info "Resolved location from default tfvars: $AZURE_LOCATION"
+            export AZURE_LOCATION
+            azd env set AZURE_LOCATION "$AZURE_LOCATION"
+            return 0
+        fi
+    fi
+    
+    # 4. Interactive prompt (local dev only)
+    if ! is_ci; then
+        log "No location found in tfvars files."
+        info "Preferred order: uksouth, ukwest, swedencentral, other Europe, then US fallback."
+        read -rp "│ Enter Azure location (default: uksouth): " AZURE_LOCATION
+        AZURE_LOCATION="${AZURE_LOCATION:-uksouth}"
+        if [[ -n "$AZURE_LOCATION" ]]; then
+            export AZURE_LOCATION
+            # Save to azd env so downstream scripts (e.g., initialize-terraform.sh) can access it
+            azd env set AZURE_LOCATION "$AZURE_LOCATION"
+            return 0
+        fi
+    fi
+    
+    return 1
+}
+
+# Set Terraform variables using azd env (stored in .azure/<env>/.env as TF_VAR_*)
+# This is the azd best practice - azd automatically exports TF_VAR_* to Terraform
+set_terraform_env_vars() {
+    local deployer
+    deployer=$(get_deployer_identity)
+    
+    log "Setting Terraform variables via azd env..."
+    
+    # Set TF_VAR_* variables - azd stores these in .azure/<env>/.env
+    # and automatically exports them when running terraform
+    azd env set TF_VAR_environment_name "$AZURE_ENV_NAME"
+    azd env set TF_VAR_location "$AZURE_LOCATION"
+    azd env set TF_VAR_acs_data_location "${TF_VAR_acs_data_location:-UK}"
+    azd env set TF_VAR_voice_live_location "${TF_VAR_voice_live_location:-swedencentral}"
+    azd env set TF_VAR_deployed_by "$deployer"
+    
+    info "Deployer: $deployer"
+    success "Set TF_VAR_* in azd environment"
+}
+
+# Configure Terraform backend based on LOCAL_STATE environment variable
+# When LOCAL_STATE=true, use local backend; otherwise use Azure Storage remote backend
+configure_terraform_backend() {
+    local backend_file="$SCRIPT_DIR/../../../infra/terraform/backend.tf"
+    local provider_conf="$SCRIPT_DIR/../../../infra/terraform/provider.conf.json"
+    local local_state="${LOCAL_STATE:-}"
+    
+    # Check if LOCAL_STATE is set in azd env
+    if [[ -z "$local_state" ]]; then
+        local_state=$(get_azd_env_value LOCAL_STATE)
+    fi
+    
+    if [[ "$local_state" == "true" ]]; then
+        log "Configuring Terraform for local state storage..."
+        
+        # Generate local backend configuration
+        cat > "$backend_file" << 'EOF'
+# ============================================================================
+# TERRAFORM BACKEND CONFIGURATION - LOCAL STATE
+# ============================================================================
+# This file was auto-generated by preprovision.sh because LOCAL_STATE=true.
+# State is stored locally in terraform.tfstate.
+#
+# WARNING: Local state is NOT shared with your team and may be lost if
+# the .terraform/ directory is deleted. Use remote state for production.
+#
+# To switch to remote state:
+#   azd env set LOCAL_STATE "false"
+#   azd env set RS_RESOURCE_GROUP "<resource-group>"
+#   azd env set RS_STORAGE_ACCOUNT "<storage-account>"
+#   azd env set RS_CONTAINER_NAME "<container>"
+#   azd hooks run preprovision
+
+terraform {
+  backend "local" {
+    path = "terraform.tfstate"
+  }
+}
+EOF
+        
+        # Remove provider.conf.json to avoid confusion
+        if [[ -f "$provider_conf" ]]; then
+            rm -f "$provider_conf"
+            log "Removed provider.conf.json (not needed for local state)"
+        fi
+        
+        success "Backend configured for local state"
+        warn "State will be stored in infra/terraform/terraform.tfstate"
+    else
+        log "Configuring Terraform for Azure Storage remote state..."
+        
+        # Generate remote backend configuration
+        cat > "$backend_file" << 'EOF'
+# ============================================================================
+# TERRAFORM BACKEND CONFIGURATION - AZURE REMOTE STATE
+# ============================================================================
+# This file was auto-generated by preprovision.sh.
+# Backend values are provided via -backend-config=provider.conf.json during init.
+#
+# To switch to local state for development:
+#   azd env set LOCAL_STATE "true"
+#   azd hooks run preprovision
+
+terraform {
+  backend "azurerm" {
+    use_azuread_auth = true
+  }
+}
+EOF
+        
+        success "Backend configured for Azure Storage remote state"
+        # Note: provider.conf.json is generated separately after initialize-terraform.sh
+        # to ensure RS_* variables are set
+    fi
+}
+
+# Generate provider.conf.json for remote state backend configuration
+# azd uses this file to pass -backend-config values to terraform init
+generate_provider_conf_json() {
+    local provider_conf="$SCRIPT_DIR/../../../infra/terraform/provider.conf.json"
+    
+    # Get remote state configuration from azd env or environment variables
+    local rs_resource_group="${RS_RESOURCE_GROUP:-}"
+    local rs_storage_account="${RS_STORAGE_ACCOUNT:-}"
+    local rs_container_name="${RS_CONTAINER_NAME:-}"
+    
+    # Try to get from azd env if not set
+    if [[ -z "$rs_resource_group" ]]; then
+        rs_resource_group=$(get_azd_env_value RS_RESOURCE_GROUP)
+    fi
+    if [[ -z "$rs_storage_account" ]]; then
+        rs_storage_account=$(get_azd_env_value RS_STORAGE_ACCOUNT)
+    fi
+    if [[ -z "$rs_container_name" ]]; then
+        rs_container_name=$(get_azd_env_value RS_CONTAINER_NAME)
+    fi
+    
+    # Check if using local state - skip validation if so
+    local local_state="${LOCAL_STATE:-}"
+    if [[ -z "$local_state" ]]; then
+        local_state=$(get_azd_env_value LOCAL_STATE)
+    fi
+    if [[ "$local_state" == "true" ]]; then
+        info "Using local state - skipping provider.conf.json generation"
+        return 0
+    fi
+    
+    # Validate required values (only for remote state)
+    if [[ -z "$rs_resource_group" || -z "$rs_storage_account" || -z "$rs_container_name" ]]; then
+        warn "Remote state variables not fully configured"
+        warn "Set RS_RESOURCE_GROUP, RS_STORAGE_ACCOUNT, RS_CONTAINER_NAME via 'azd env set'"
+        warn "Or run initialize-terraform.sh to create remote state storage"
+        return 1
+    fi
+    
+    # Ensure RS_STATE_KEY is persisted for THIS environment so azd can
+    # substitute it at provision time. Always derived from the environment name
+    # to keep one-state-key-per-environment consistency.
+    local rs_state_key="${AZURE_ENV_NAME}.tfstate"
+    if [[ "$(get_azd_env_value RS_STATE_KEY)" != "$rs_state_key" ]]; then
+        azd env set RS_STATE_KEY "$rs_state_key"
+    fi
+    
+    log "Generating provider.conf.json with azd substitution placeholders..."
+    
+    # SAFETY: write ${RS_*} placeholders, NOT literals. This file lives in the
+    # shared source tree; azd resolves the placeholders from the ACTIVE
+    # environment when copying it to .azure/<env>/infra/terraform/<env>.conf.json
+    # on every provision (including --preview, which does NOT run this hook).
+    # Hook-time literals previously pinned whichever environment ran the hook
+    # last, which pointed a staging preview at prod.tfstate. A missing value
+    # substitutes to empty and terraform init fails closed instead of silently
+    # opening another environment's state.
+    cat > "$provider_conf" << 'EOF'
+{
+  "resource_group_name": "${RS_RESOURCE_GROUP}",
+  "storage_account_name": "${RS_STORAGE_ACCOUNT}",
+  "container_name": "${RS_CONTAINER_NAME}",
+  "key": "${RS_STATE_KEY}"
+}
+EOF
+    
+    success "Generated provider.conf.json (environment-agnostic placeholders)"
+    log "   resource_group_name: \${RS_RESOURCE_GROUP} (this env: $rs_resource_group)"
+    log "   storage_account_name: \${RS_STORAGE_ACCOUNT} (this env: $rs_storage_account)"
+    log "   container_name: \${RS_CONTAINER_NAME} (this env: $rs_container_name)"
+    log "   key: \${RS_STATE_KEY} (this env: $rs_state_key)"
+}
+
+# Generate main.tfvars.json from current azd environment
+# This file is regenerated each time to stay in sync with the active azd environment
+generate_tfvars_json() {
+    local tfvars_json="$SCRIPT_DIR/../../../infra/terraform/main.tfvars.json"
+    local params_dir="$SCRIPT_DIR/../../../infra/terraform/params"
+    local env_tfvars="$params_dir/main.tfvars.${AZURE_ENV_NAME}.json"
+    local deployer
+    deployer=$(get_deployer_identity)
+    
+    log "Generating main.tfvars.json for environment: $AZURE_ENV_NAME"
+    
+    # Get principal ID if available
+    local principal_id="${AZURE_PRINCIPAL_ID:-}"
+    if [[ -z "$principal_id" ]] && command -v az &>/dev/null; then
+        principal_id=$(az ad signed-in-user show --query id -o tsv 2>/dev/null || true)
+    fi
+    
+    # Build the generated baseline using jq for proper escaping, then merge any
+    # environment-specific params file over it. This keeps azd's active
+    # environment variables authoritative for identity/traceability while making
+    # staging/prod topology flags (private networking, App Gateway, SKUs) flow
+    # into the generated main.tfvars.json used by azd's Terraform provider.
+    # SAFETY: environment_name and location are written as ${AZURE_ENV_NAME} /
+    # ${AZURE_LOCATION} placeholders, NOT hook-time literals. azd substitutes
+    # them from the ACTIVE environment on every provision (including --preview,
+    # which does NOT run this hook), so a stale generated file can never pin
+    # another environment's name into terraform (the prod.tfstate hazard).
+    local base_content json_content
+    base_content=$(jq -n \
+        --arg deployer "$deployer" \
+        --arg principal "${principal_id:-}" \
+        '{
+            environment_name: "${AZURE_ENV_NAME}",
+            location: "${AZURE_LOCATION}",
+            acs_data_location: "UK",
+            voice_live_location: "swedencentral",
+            voice_live_realtime_location: "${TF_VAR_voice_live_realtime_location}",
+            model_deployments: [
+                {
+                    name: "gpt-4o",
+                    version: "2024-11-20",
+                    sku_name: "GlobalStandard",
+                    capacity: 50
+                },
+                {
+                    name: "gpt-4o-mini",
+                    version: "2024-07-18",
+                    sku_name: "GlobalStandard",
+                    capacity: 50
+                }
+            ],
+            deployed_by: $deployer
+        } + (if $principal != "" then {principal_id: $principal} else {} end)'
+    )
+
+    if [[ -f "$env_tfvars" ]]; then
+        log "Merging environment parameters from $(basename "$env_tfvars")"
+        json_content=$(jq -n \
+            --argjson generated "$base_content" \
+            --slurpfile env_params "$env_tfvars" \
+            '$generated * ($env_params[0] // {})'
+        )
+    else
+        json_content="$base_content"
+    fi
+
+    local app_gateway_enabled origin_cert_uri
+    app_gateway_enabled=$(jq -r '.enable_application_gateway // false' <<< "$json_content")
+    origin_cert_uri="${TF_VAR_app_gateway_origin_certificate_secret_id:-}"
+    if [[ -z "$origin_cert_uri" ]]; then
+        origin_cert_uri=$(get_azd_env_value TF_VAR_app_gateway_origin_certificate_secret_id)
+    fi
+
+    if [[ "$app_gateway_enabled" == "true" && -z "$origin_cert_uri" ]]; then
+        warn "App Gateway is enabled for $AZURE_ENV_NAME, but TF_VAR_app_gateway_origin_certificate_secret_id is not set."
+        warn "The App Gateway origin will remain skipped until the Cloudflare Origin Certificate secret URI is provided."
+        log "Set it with: azd env set TF_VAR_app_gateway_origin_certificate_secret_id '<key-vault-secret-uri>'"
+    elif [[ -n "$origin_cert_uri" ]]; then
+        log "App Gateway origin certificate URI is configured via TF_VAR_app_gateway_origin_certificate_secret_id"
+        json_content=$(jq \
+            --arg origin_cert_uri "$origin_cert_uri" \
+            '. + {app_gateway_origin_certificate_secret_id: $origin_cert_uri}' \
+            <<< "$json_content"
+        )
+    fi
+    
+    echo "$json_content" > "$tfvars_json"
+    success "Generated main.tfvars.json"
+    log "   environment_name: $AZURE_ENV_NAME"
+    log "   location: $AZURE_LOCATION"
+    [[ -f "$env_tfvars" ]] && log "   env params: $(basename "$env_tfvars")" || true
+    [[ -n "$principal_id" ]] && log "   principal_id: ${principal_id:0:8}..." || true
+}
+
+# ============================================================================
+# Providers
+# ============================================================================
+
+provider_terraform() {
+    header "🏗️  Terraform Pre-Provisioning"
+    
+    # Validate required variables
+    if [[ -z "${AZURE_ENV_NAME:-}" ]]; then
+        fail "AZURE_ENV_NAME is not set"
+        footer
+        exit 1
+    fi
+    
+    # Resolve location using fallback chain
+    if ! resolve_location; then
+        fail "Could not resolve AZURE_LOCATION. Set it via 'azd env set AZURE_LOCATION <region>' or add to tfvars."
+        footer
+        exit 1
+    fi
+    
+    info "Environment: $AZURE_ENV_NAME"
+    info "Location: $AZURE_LOCATION"
+    log ""
+    
+    # Configure backend based on LOCAL_STATE
+    # This must happen before terraform init
+    configure_terraform_backend
+    
+    # Generate main.tfvars.json from current azd environment
+    # This ensures tfvars stays in sync when switching azd environments
+    generate_tfvars_json
+    
+    # Run remote state initialization (only if not using local state)
+    local local_state="${LOCAL_STATE:-}"
+    if [[ -z "$local_state" ]]; then
+        local_state=$(get_azd_env_value LOCAL_STATE)
+    fi
+    
+    local tf_init="$SCRIPT_DIR/helpers/initialize-terraform.sh"
+    if [[ "$local_state" != "true" ]] && [[ -f "$tf_init" ]]; then
+        is_ci && export TF_INIT_SKIP_INTERACTIVE=true
+        log "Setting up Terraform remote state..."
+        AZD_LOG_IN_BOX=true bash "$tf_init"
+        
+        # Re-check LOCAL_STATE after initialize-terraform.sh runs
+        # User may have chosen local state interactively
+        # Use head -n1 to avoid capturing warning messages from azd
+        local_state=$(azd env get-value LOCAL_STATE 2>/dev/null | head -n1 || echo "")
+        # Filter out any error messages that might be in the output
+        [[ "$local_state" == ERROR:* ]] && local_state=""
+        [[ "$local_state" == *"not found"* ]] && local_state=""
+        
+        # Only generate provider.conf.json if still using remote state
+        if [[ "$local_state" == "true" ]]; then
+            # User selected local state - reconfigure backend
+            info "User selected local state - reconfiguring backend..."
+            configure_terraform_backend
+        else
+            log ""
+            generate_provider_conf_json
+        fi
+    elif [[ "$local_state" == "true" ]]; then
+        info "Using local state - skipping remote state initialization"
+    else
+        warn "initialize-terraform.sh not found, skipping remote state setup"
+    fi
+    
+    log ""
+    
+    # Set Terraform variables via azd env
+    # In CI, the workflow may pre-set TF_VAR_* - check before overwriting
+    if is_ci; then
+        # CI: Only set if not already configured by workflow
+        if [[ -z "${TF_VAR_environment_name:-}" ]]; then
+            log "Setting Terraform variables..."
+            set_terraform_env_vars
+        else
+            info "CI mode: TF_VAR_* already set by workflow, skipping"
+        fi
+    else
+        # Local: Always set to ensure consistency
+        log "Setting Terraform variables..."
+        set_terraform_env_vars
+    fi
+    
+    footer
+}
+
+provider_bicep() {
+    header "🔧 Bicep Pre-Provisioning"
+    
+    local ssl_script="$SCRIPT_DIR/helpers/ssl-preprovision.sh"
+    
+    if [[ ! -f "$ssl_script" ]]; then
+        warn "ssl-preprovision.sh not found"
+        footer
+        return 0
+    fi
+    
+    if is_ci; then
+        info "CI/CD mode: Checking for SSL certificates..."
+        if [[ -n "${SSL_CERT_BASE64:-}" && -n "${SSL_KEY_BASE64:-}" ]]; then
+            echo "$SSL_CERT_BASE64" | base64 -d > "$SCRIPT_DIR/helpers/ssl-cert.pem"
+            echo "$SSL_KEY_BASE64" | base64 -d > "$SCRIPT_DIR/helpers/ssl-key.pem"
+            success "SSL certificates configured from environment"
+        else
+            warn "No SSL certificates in environment (set SSL_CERT_BASE64 and SSL_KEY_BASE64)"
+        fi
+    else
+        log "Running SSL pre-provisioning..."
+        AZD_LOG_IN_BOX=true bash "$ssl_script"
+    fi
+    
+    footer
+}
+
+# ============================================================================
+# Main
+# ============================================================================
+
+main() {
+    if [[ -z "$PROVIDER" ]]; then
+        fail "Usage: $0 <bicep|terraform>"
+        exit 1
+    fi
+    
+    is_ci && info "🤖 CI/CD mode detected"
+    
+    # Run preflight checks first (tools, auth, providers, ARM_SUBSCRIPTION_ID)
+    local preflight_script="$SCRIPT_DIR/helpers/preflight-checks.sh"
+    if [[ -f "$preflight_script" ]]; then
+        # shellcheck source=helpers/preflight-checks.sh
+        source "$preflight_script"
+        if ! run_preflight_checks; then
+            fail "Preflight checks failed. Please resolve the issues above before continuing."
+            exit 1
+        fi
+    else
+        warn "Preflight checks script not found, skipping environment validation"
+    fi
+    
+    case "$PROVIDER" in
+        terraform) provider_terraform ;;
+        bicep)     provider_bicep ;;
+        *)
+            fail "Invalid provider: $PROVIDER (must be 'bicep' or 'terraform')"
+            exit 1
+            ;;
+    esac
+    
+    phase_success "Pre-provisioning complete!"
+}
+
+main "$@"

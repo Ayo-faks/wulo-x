@@ -1,0 +1,90 @@
+name: InboundClinicAgent
+description: Governed inbound clinic front-desk assistant
+
+handoff:
+  trigger: handoff_inbound_clinic_agent
+  is_entry_point: true
+
+greeting: |
+  Hello, thanks for calling. How can I help today?
+
+return_greeting: |
+  Thanks for staying with me. How can I help with your call?
+
+voice:
+  # Dragon HD Omni rendering of the same British Sonia persona (verified
+  # synthesizing on the staging VoiceLive resource 2026-07-08). HD voices use
+  # multiplier rate strings (0.5-1.5), not percentages: "0.97" ~ the old -3%.
+  # temperature (0-1) tunes HD expressiveness; prosody SSML is not supported
+  # for HD voices.
+  name: en-GB-Sonia:DragonHDOmniLatestNeural
+  type: azure-standard
+  rate: "0.97"
+  temperature: 0.7
+
+voicelive_model:
+  # gpt-realtime-1.5: VoiceLive-managed (no deployment); verified 2026-07-08
+  # on staging incl. the gpt-4o-transcribe sidecar compatibility.
+  deployment_id: gpt-realtime-1.5
+  temperature: 0.2
+  max_tokens: 2048
+
+cascade_model:
+  deployment_id: gpt-4o-mini
+  temperature: 0.2
+  max_tokens: 1024
+
+session:
+  modalities: [TEXT, AUDIO]
+  input_audio_format: PCM16
+  output_audio_format: PCM16
+  input_audio_transcription_settings:
+    model: gpt-4o-transcribe
+    language: en-GB
+  # PSTN callers echo the agent's own voice back through the phone's speaker.
+  # Without server-side AEC the echo reaches semantic VAD/STT and creates
+  # phantom turns (live 2026-07-08: greeting cut + "You're welcome" reply to
+  # silence). Deep noise suppression additionally filters line noise.
+  input_audio_echo_cancellation:
+    type: server_echo_cancellation
+  input_audio_noise_reduction:
+    type: azure_deep_noise_suppression
+  turn_detection:
+    type: azure_semantic_vad
+    # Keep these values aligned with the production configuration whose
+    # handset barge-in remains proven. AEC + deep noise suppression stay on.
+    threshold: 0.5
+    prefix_padding_ms: 240
+    # Latency-tuned 2026-07-07: 900 ms added ~0.9 s to every reply. Semantic
+    # VAD tolerates 400-600 ms without clipping slow speakers; ledger + the
+    # scheduling-answer regression tests guard this value.
+    silence_duration_ms: 550
+    interrupt_response: true
+    create_response: false
+    auto_truncate: true
+  tool_choice: auto
+
+speech:
+  recognition:
+    language: en-GB
+  synthesis:
+    voice_name: en-GB-SoniaNeural
+  vad:
+    threshold: 0.02
+    silence_duration_ms: 700
+    prefix_padding_ms: 200
+
+tools:
+  - get_clinic_hours
+  - get_clinic_services
+  - request_callback
+  - record_inbound_opt_out
+  - escalate_inbound_to_staff
+  - log_inbound_call_outcome
+
+prompts:
+  path: ../../../../../../.agentops/prompts/inbound-assistant.prompt.md
+
+metadata:
+  governed_prompt: .agentops/prompts/inbound-assistant.prompt.md
+  phase: inbound-phone-mvp

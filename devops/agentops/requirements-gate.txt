@@ -1,0 +1,23 @@
+# AgentOps governance gate runners — pinned for a reproducible safety gate.
+#
+# Installed OUT-OF-PROCESS, never into the ART app env (pyproject.toml / uv.lock):
+#   - CI:    uv pip install --system -r devops/agentops/requirements-gate.txt
+#   - Local: make agentops_gate_env        (builds an isolated .venv-agentops)
+#
+# WHY ISOLATED (do not move these into pyproject [dev]/[dev-all]):
+#   assert-ai requires opentelemetry-sdk>=1.39.0, but the shipped app pins the whole
+#   OpenTelemetry stack at ==1.37.0 / ==0.58b0 (pyproject.toml). Co-resolving them makes
+#   `uv lock` unsatisfiable. Keeping the gate runners in a separate env leaves the
+#   product's telemetry stack untouched and keeps `uv run --extra dev` working.
+#
+# The AgentOps accelerator is pinned separately (agentops-accelerator[foundry,agent]
+# ==0.5.2) in the workflow "Install AgentOps Toolkit" step and the Makefile
+# AGENTOPS_ACCELERATOR variable.
+#
+# PLATFORM NOTE: azure-ai-evaluation[redteam] -> pyrit -> base2048 (a Rust extension).
+# Prebuilt wheels exist for x86_64 (GitHub Actions ubuntu-latest). On arm64 without a
+# wheel you need a Rust toolchain (rustup) to build base2048.
+
+assert-ai==0.1.0
+azure-ai-evaluation[redteam]==1.16.5
+pyrit==0.11.0

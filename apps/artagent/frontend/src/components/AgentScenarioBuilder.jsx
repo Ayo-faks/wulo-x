@@ -1,0 +1,337 @@
+/**
+ * AgentScenarioBuilder Component
+ * ===============================
+ * 
+ * A unified builder dialog that combines:
+ * - Agent Builder: Create and configure individual agents
+ * - Scenario Builder: Create orchestration flows between agents
+ * 
+ * Users can toggle between modes using a toolbar switch.
+ */
+
+import React, { useState, useCallback, useEffect, useRef } from 'react';
+import {
+  Avatar,
+  Box,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Divider,
+  IconButton,
+  LinearProgress,
+  Stack,
+  Chip,
+  ToggleButton,
+  ToggleButtonGroup,
+  Tooltip,
+  Typography,
+} from '@mui/material';
+import CloseIcon from '@mui/icons-material/Close';
+import SmartToyIcon from '@mui/icons-material/SmartToy';
+import HubIcon from '@mui/icons-material/Hub';
+import EditIcon from '@mui/icons-material/Edit';
+
+import AgentBuilderContent from './AgentBuilderContent.jsx';
+import ScenarioBuilderGraph from './ScenarioBuilderGraph.jsx';
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STYLES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const styles = {
+  dialog: {
+    '& .MuiDialog-paper': {
+      maxWidth: '1200px',
+      width: '95vw',
+      height: '90vh',
+      maxHeight: '90vh',
+      borderRadius: '16px',
+      resize: 'both',
+      overflow: 'auto',
+    },
+  },
+  header: {
+    background: 'linear-gradient(135deg, var(--vsc-accent) 0%, var(--vsc-link) 50%, var(--vsc-link) 100%)',
+    color: 'white',
+    padding: '16px 24px',
+    borderRadius: '16px 16px 0 0',
+  },
+  modeToggle: {
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: '12px',
+    '& .MuiToggleButton-root': {
+      color: 'rgba(255,255,255,0.7)',
+      border: 'none',
+      padding: '8px 16px',
+      textTransform: 'none',
+      fontWeight: 600,
+      '&.Mui-selected': {
+        color: 'white',
+        backgroundColor: 'rgba(255,255,255,0.2)',
+      },
+      '&:hover': {
+        backgroundColor: 'rgba(255,255,255,0.15)',
+      },
+    },
+  },
+  content: {
+    height: 'calc(100% - 72px)', // Subtract header height
+    overflow: 'hidden',
+  },
+  betaChip: {
+    color: 'white',
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderColor: 'rgba(255,255,255,0.3)',
+    fontWeight: 700,
+    letterSpacing: '0.5px',
+    height: 22,
+  },
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MAIN COMPONENT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export default function AgentScenarioBuilder({
+  open,
+  onClose,
+  sessionId,
+  sessionProfile = null,
+  // Agent callbacks
+  onAgentCreated,
+  onAgentUpdated,
+  existingAgentConfig = null,
+  agentEditMode = false,
+  // Scenario callbacks
+  onScenarioCreated,
+  onScenarioUpdated,
+  existingScenarioConfig = null,
+  scenarioEditMode = false,
+  // Shared scenario state (single source of truth from App.jsx)
+  sharedScenarioConfig = null,
+  onRefreshScenarios = null,
+  onActivateScenario = null,
+  // Initial mode
+  initialMode = 'agents',
+  // When set, the embedded Agent Builder deep-links into editing this live
+  // agent (loads its config + opens in edit mode). Used by "Edit live agent".
+  initialEditAgentName = null,
+}) {
+  // Mode state: 'agents' or 'scenarios'
+  const [mode, setMode] = useState(initialMode);
+  
+  // Refresh key - increments to force child components to remount. We deliberately
+  // do NOT bump on every open: remounting the ~3,900-line Agent Builder is expensive,
+  // so we only force it when the edited session actually changes (see effect below).
+  const [refreshKey, setRefreshKey] = useState(0);
+  const lastRemountSessionRef = useRef(null);
+  
+  // Track agent being edited from scenario builder
+  const [editingAgentFromScenario, setEditingAgentFromScenario] = useState(null);
+  const [editingAgentSessionId, setEditingAgentSessionId] = useState(null);
+
+  const handleModeChange = useCallback((event, newMode) => {
+    if (newMode !== null) {
+      // Clear editing state when switching modes manually
+      if (newMode === 'scenarios') {
+        setEditingAgentFromScenario(null);
+        setEditingAgentSessionId(null);
+        // Force remount of scenario builder to show blank canvas
+        setRefreshKey((prev) => prev + 1);
+      }
+      setMode(newMode);
+    }
+  }, []);
+
+  const handleClose = useCallback(() => {
+    // Clear editing state on close
+    setEditingAgentFromScenario(null);
+    setEditingAgentSessionId(null);
+    onClose();
+  }, [onClose]);
+
+  // Handler for editing an agent from the scenario builder
+  const handleEditAgentFromScenario = useCallback((agent, agentSessionId) => {
+    setEditingAgentFromScenario(agent);
+    setEditingAgentSessionId(agentSessionId || sessionId);
+    setMode('agents');
+  }, [sessionId]);
+
+  // Handler for creating a new agent from scenario builder
+  const handleCreateAgentFromScenario = useCallback(() => {
+    setEditingAgentFromScenario(null);
+    setEditingAgentSessionId(null);
+    setMode('agents');
+  }, []);
+
+  // Wrap agent callbacks to also refresh scenario builder
+  const handleAgentCreatedInternal = useCallback((config) => {
+    if (onAgentCreated) onAgentCreated(config);
+    // Clear editing state after creation
+    setEditingAgentFromScenario(null);
+    setEditingAgentSessionId(null);
+    // Trigger refresh so scenario builder sees updated agents
+    setRefreshKey((prev) => prev + 1);
+  }, [onAgentCreated]);
+
+  const handleAgentUpdatedInternal = useCallback((config) => {
+    if (onAgentUpdated) onAgentUpdated(config);
+    // Clear editing state after update
+    setEditingAgentFromScenario(null);
+    setEditingAgentSessionId(null);
+    // Trigger refresh so scenario builder sees updated agents
+    setRefreshKey((prev) => prev + 1);
+  }, [onAgentUpdated]);
+
+  // Determine if we're in agent edit mode (either from prop or from scenario navigation)
+  const isAgentEditMode = agentEditMode || editingAgentFromScenario !== null;
+  const effectiveAgentSessionId = editingAgentSessionId || sessionId;
+
+  // Only remount the embedded builder when the dialog opens onto a DIFFERENT
+  // session than last time. Reopening for the same session reuses the mounted
+  // component (preserves form state, avoids a costly full remount).
+  useEffect(() => {
+    if (open && effectiveAgentSessionId !== lastRemountSessionRef.current) {
+      lastRemountSessionRef.current = effectiveAgentSessionId;
+      setRefreshKey((prev) => prev + 1);
+    }
+  }, [open, effectiveAgentSessionId]);
+
+  const getModeDescription = () => {
+    if (mode === 'agents') {
+      return 'Configure AI agents with custom prompts, tools, and voice settings';
+    }
+    return 'Design agent orchestration flows with handoffs and routing';
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onClose={handleClose}
+      maxWidth="lg"
+      fullWidth
+      sx={styles.dialog}
+    >
+      {/* Header with mode toggle */}
+      <DialogTitle sx={styles.header}>
+        <Stack direction="row" alignItems="center" justifyContent="space-between">
+          <Stack direction="row" alignItems="center" spacing={2}>
+            <Avatar
+              sx={{
+                bgcolor: 'rgba(255,255,255,0.15)',
+                width: 40,
+                height: 40,
+              }}
+            >
+              {mode === 'agents' ? (
+                agentEditMode ? <EditIcon /> : <SmartToyIcon />
+              ) : (
+                scenarioEditMode ? <EditIcon /> : <HubIcon />
+              )}
+            </Avatar>
+            <Box>
+              <Stack direction="row" alignItems="center" spacing={1}>
+                <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                  {mode === 'agents' ? 'Agent Builder' : 'Scenario Builder'}
+                </Typography>
+                <Chip
+                  label="BETA"
+                  size="small"
+                  variant="outlined"
+                  sx={styles.betaChip}
+                />
+              </Stack>
+              <Typography variant="caption" sx={{ opacity: 0.8 }}>
+                {getModeDescription()}
+              </Typography>
+            </Box>
+          </Stack>
+
+          <Stack direction="row" alignItems="center" spacing={3}>
+            {/* Mode toggle */}
+            <ToggleButtonGroup
+              value={mode}
+              exclusive
+              onChange={handleModeChange}
+              size="small"
+              sx={styles.modeToggle}
+            >
+              <ToggleButton value="agents">
+                <Tooltip title="Configure individual agents">
+                  <Stack direction="row" alignItems="center" spacing={1}>
+                    <SmartToyIcon fontSize="small" />
+                    <span>Agents</span>
+                  </Stack>
+                </Tooltip>
+              </ToggleButton>
+              <ToggleButton value="scenarios">
+                <Tooltip title="Design agent orchestration flows">
+                  <Stack direction="row" alignItems="center" spacing={1}>
+                    <HubIcon fontSize="small" />
+                    <span>Scenarios</span>
+                  </Stack>
+                </Tooltip>
+              </ToggleButton>
+            </ToggleButtonGroup>
+
+            {/* Session info */}
+            <Box
+              sx={{
+                px: 1.5,
+                py: 0.75,
+                borderRadius: '999px',
+                backgroundColor: 'rgba(255,255,255,0.12)',
+                border: '1px solid rgba(255,255,255,0.2)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 1,
+              }}
+            >
+              <Typography variant="caption" sx={{ color: 'white', opacity: 0.8 }}>
+                Session
+              </Typography>
+              <Typography variant="body2" sx={{ color: 'white', fontFamily: 'monospace' }}>
+                {sessionId || 'none'}
+              </Typography>
+            </Box>
+
+            <IconButton onClick={handleClose} sx={{ color: 'white' }}>
+              <CloseIcon />
+            </IconButton>
+          </Stack>
+        </Stack>
+      </DialogTitle>
+
+      {/* Content - switches between Agent and Scenario builder */}
+      <Box sx={styles.content}>
+        {mode === 'agents' ? (
+          <AgentBuilderContent
+            key={`agent-builder-${effectiveAgentSessionId}-${refreshKey}`}
+            sessionId={effectiveAgentSessionId}
+            sessionProfile={sessionProfile}
+            onAgentCreated={handleAgentCreatedInternal}
+            onAgentUpdated={handleAgentUpdatedInternal}
+            existingConfig={editingAgentFromScenario || existingAgentConfig}
+            editMode={isAgentEditMode || Boolean(initialEditAgentName)}
+            initialEditAgentName={initialEditAgentName}
+          />
+        ) : (
+          <ScenarioBuilderGraph
+            key={`scenario-builder-${sessionId}-${refreshKey}`}
+            sessionId={sessionId}
+            onScenarioCreated={onScenarioCreated}
+            onScenarioUpdated={onScenarioUpdated}
+            existingConfig={existingScenarioConfig}
+            editMode={scenarioEditMode}
+            onEditAgent={handleEditAgentFromScenario}
+            onCreateAgent={handleCreateAgentFromScenario}
+            sharedScenarioConfig={sharedScenarioConfig}
+            onRefreshScenarios={onRefreshScenarios}
+            onActivateScenario={onActivateScenario}
+          />
+        )}
+      </Box>
+    </Dialog>
+  );
+}

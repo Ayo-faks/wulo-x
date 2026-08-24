@@ -1,0 +1,92 @@
+# Python
+.venv/
+.venv-agentops/
+__pycache__/
+*.pyc
+
+# azd / AgentOps local state (per-environment, generated — not committed)
+.azure/
+.azure-cli-extensions/
+.agentops/results/
+.agentops/assert/
+.agentops/redteam/
+.agentops/release/
+.agentops/deployments/
+.agentops/.env
+
+# ASSERT run artifacts
+assert/artifacts/
+
+# AgentOps generated run state (eval output, llm cache, agent run history/report)
+/artifacts/*
+!/artifacts/pitch-deck/
+!/artifacts/pitch-deck/*.md
+/artifacts/pitch-deck/*.html
+/artifacts/pitch-deck/*.pdf
+.agentops/cache/
+.agentops/agent/
+
+# Vendored upstream reference clone (ART is vendored in-tree; this 157M clone is disposable)
+.tmp-art-upstream/
+
+# Agent-init / security-scan temp scaffolds
+.tmp-agent-init-probe/
+.scan_*/
+.private-evidence/
+
+# Node
+**/node_modules/
+**/playwright-report/
+**/test-results/
+
+# Terraform (never commit state or real tfvars; keep examples)
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+
+# Env files (never commit real envs; keep samples/examples)
+**/.env
+!**/.env.sample
+!**/.env.example
+# Backup env files often contain live secrets — never commit
+**/.env.bak*
+**/env.bak*
+
+# Python tooling caches / build output
+.tools/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# OS / editor
+.DS_Store
+*.log
+twilo.md
+infra/certs/
+.env.local
+.terraform-prod/
+
+# Private workspace material is not part of the public project
+/.worktrees/
+/AGENTS.md
+/artifacts/
+/memory/
+/prompts/
+/research/
+/rules/
+/skills/
+/twilo.md
+/CV-*
+/Cover-Letter-*
+/interview-prep-*
+/Supporting-Statement-*
+/*-presentation-prep.md
+/*.docx
+/*.pdf
+/infra/terraform/main.tfvars.json
+/infra/terraform/params/main.tfvars.*.json

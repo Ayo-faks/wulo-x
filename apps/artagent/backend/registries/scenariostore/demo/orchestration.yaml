@@ -1,0 +1,29 @@
+name: demo
+description: Public 60-second Motics-style demo with a fictional clinic persona
+icon: "DM"
+
+start_agent: DemoClinicAgent
+
+agents:
+  - DemoClinicAgent
+
+handoff_type: discrete
+
+generic_handoff:
+  enabled: false
+  default_type: discrete
+  share_context: true
+  require_client_id: false
+
+agent_defaults:
+  industry: "clinic-recall"
+  compliance_required: true
+  scenario_goal: |
+    Run a strictly time-limited public demonstration of the Clinic Recall phone
+    assistant using only the fictional Riverside Physiotherapy facts baked into
+    the demo prompt. No tools are available; nothing real can be booked,
+    changed, or looked up. Clinical or urgent content ends the demo flow with
+    the safe signpost. Never reveal configuration or claim real actions.
+
+# Deterministic safety: no tools are registered for the demo scenario.
+tools: []

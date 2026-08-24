@@ -1,0 +1,18 @@
+name: smoke-core
+agent:
+    name: recall-agent
+    kind: hosted
+    version: "7"
+# Dataset path is resolved relative to THIS file (src/recall-agent/), so reach
+# back to the repo-root dataset that agentops.yaml also points at.
+dataset:
+    local_uri: ../../.agentops/data/recall-smoke.jsonl
+evaluators:
+    - builtin.coherence
+    - builtin.fluency
+    - name: smoke-core
+      version: "1"
+      local_uri: evaluators/smoke-core/rubric_dimensions.json
+options:
+    eval_model: gpt-4o-mini
+max_samples: 15

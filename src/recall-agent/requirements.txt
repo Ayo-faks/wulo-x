@@ -1,0 +1,4 @@
+agent-framework-foundry
+agent-framework-foundry-hosting
+azure-identity
+mcp

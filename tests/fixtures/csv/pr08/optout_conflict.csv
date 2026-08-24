@@ -1,0 +1,2 @@
+appointment_source_ref,patient_source_ref,patient_name,patient_phone,patient_email,status,start_at,value,consent_sms,consent_email,consent_call,opt_out_sms,opt_out_email,opt_out_call
+APPT-PR08-C01,PAT-PR08-C01,Test Patient Conflict,+447700900601,,missed,2026-06-20T09:00:00+00:00,,yes,no,no,yes,no,no

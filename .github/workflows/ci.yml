@@ -1,0 +1,143 @@
+name: CI
+
+"on":
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  python:
+    name: Python tests and lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install
+        run: uv sync --extra dev
+      - name: Ruff
+        run: >-
+          uv run ruff check
+          src/clinic_recall
+          tests/test_clinic_recall_*.py
+          devops/probes/staging_voice_probe.py
+          tests/test_staging_voice_probe.py
+      - name: Offline tests
+        run: uv run pytest -q
+
+  postgres:
+    name: PostgreSQL isolation tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CLINIC_RECALL_TEST_DSN: postgresql+psycopg://clinic_test:clinic_test@localhost:5432/clinic_test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install
+        run: uv sync --extra dev
+      - name: Create ordinary database owner
+        run: |
+          uv run python - <<'PY'
+          import psycopg
+
+          with psycopg.connect(
+              "postgresql://postgres:postgres@localhost:5432/postgres",
+              autocommit=True,
+          ) as connection:
+              connection.execute(
+                  "CREATE ROLE clinic_test LOGIN PASSWORD 'clinic_test' "
+                  "NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS"
+              )
+              connection.execute("CREATE DATABASE clinic_test OWNER clinic_test")
+          PY
+      - name: PostgreSQL tests
+        run: uv run pytest -q -m postgres
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/artagent/frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/artagent/frontend/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+      - name: Build
+        run: npm run build
+
+  terraform:
+    name: Terraform validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+      - name: Initialize without backend
+        run: terraform init -backend=false -lockfile=readonly
+      - name: Check formatting
+        run: terraform fmt -check -recursive
+      - name: Validate
+        run: terraform validate
