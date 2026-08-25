@@ -187,7 +187,7 @@ docs = [
     "mkdocs>=1.6.1",
     "mkdocs-material>=9.4.0",
     "mkdocstrings[python]>=0.20.0",
-    "pymdown-extensions>=10.0.0",
+    "pymdown-extensions>=11.0.1",
     "mkdocs-mermaid2-plugin>=1.2.2",
     "neoteroi-mkdocs==1.1.3",
     "mkdocs-mermaid-zoom>=0.1.0",
@@ -203,7 +203,7 @@ wulo-x-server = "apps.artagent.backend.main:main"
 # uv will use [project.optional-dependencies].dev automatically with --extra dev
 constraint-dependencies = [
     "click>=8.3.3",
-    "cryptography>=48.0.1",
+    "cryptography>=50.0.0",
     "idna>=3.15",
 ]
 

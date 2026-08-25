@@ -29,7 +29,7 @@ from starlette.responses import JSONResponse, Response
 workspace_root = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(workspace_root))
 
-from utils.ml_logging import get_logger
+from utils.ml_logging import get_logger  # noqa: E402
 
 logger = get_logger(__name__)
 
@@ -55,7 +55,10 @@ def _bootstrap_appconfig() -> None:
     Resolves Key Vault references for secrets like AZURE_COSMOS_CONNECTION_STRING.
     """
     try:
-        from azure.appconfiguration import AzureAppConfigurationClient, SecretReferenceConfigurationSetting
+        from azure.appconfiguration import (
+            AzureAppConfigurationClient,
+            SecretReferenceConfigurationSetting,
+        )
         from azure.identity import DefaultAzureCredential
         from azure.keyvault.secrets import SecretClient
         
@@ -83,7 +86,7 @@ def _bootstrap_appconfig() -> None:
                     kv_client = SecretClient(vault_url=vault_url, credential=credential)
                     secret = kv_client.get_secret(secret_name)
                     connection_string = secret.value
-                    logger.info(f"Resolved Cosmos connection from Key Vault")
+                    logger.info("Resolved Cosmos connection from Key Vault")
                 else:
                     connection_string = kv.value
                     logger.info("Loaded Cosmos connection from App Config")
@@ -710,11 +713,13 @@ async def tools_get_decline_codes_metadata(request: Request) -> Response:
 async def _list_registered_tools() -> dict[str, Any]:
     """Return the registered tools using the public FastMCP API.
 
-    FastMCP exposes the supported public async ``get_tools()`` accessor. Older
-    releases stored tools on the private ``_tool_manager._tools`` mapping, which
-    was removed in newer versions (causing AttributeError at runtime). Prefer the
-    public API and fall back to the private attribute only when necessary.
+    FastMCP 3 exposes ``list_tools()`` while FastMCP 2 exposed ``get_tools()``.
+    Older releases stored tools on the private ``_tool_manager._tools`` mapping.
     """
+    list_tools = getattr(mcp, "list_tools", None)
+    if list_tools is not None:
+        tools = await list_tools()
+        return {tool.name: tool for tool in tools}
     try:
         return dict(await mcp.get_tools())
     except AttributeError:

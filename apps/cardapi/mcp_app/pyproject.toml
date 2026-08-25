@@ -4,10 +4,10 @@ version = "0.1.0"
 description = "MCP Server for Card Decline Code Lookup"
 requires-python = ">=3.11"
 dependencies = [
-    "fastmcp>=2.0.0",
+    "fastmcp>=3.2.0",
     "httpx>=0.27.2",
     "colorama>=0.4.6",
-    "python-dotenv>=1.0.1",
+    "python-dotenv>=1.2.2",
     "opentelemetry-api>=1.37.0",
     "opentelemetry-sdk>=1.37.0",
     "azure-monitor-opentelemetry>=1.8.2",
@@ -20,5 +20,13 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["."]
 
-[tool.uv]
-dev-dependencies = []
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["../../.."]
+testpaths = ["tests"]

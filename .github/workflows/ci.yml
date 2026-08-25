@@ -100,6 +100,27 @@ jobs:
       - name: PostgreSQL tests
         run: uv run pytest -q -m postgres
 
+  cardapi:
+    name: CardAPI MCP tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/cardapi/mcp_app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: apps/cardapi/mcp_app/uv.lock
+      - name: Install
+        run: uv sync --group dev --frozen
+      - name: Test
+        run: uv run pytest -q
+
   frontend:
     name: Frontend build
     runs-on: ubuntu-latest
