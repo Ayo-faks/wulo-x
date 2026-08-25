@@ -102,7 +102,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Download candidate deployment record
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: foundry-agent-dev-candidate
           path: .agentops/deployments
@@ -464,7 +464,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Download candidate deployment record
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: foundry-agent-dev-candidate
           path: .agentops/deployments
