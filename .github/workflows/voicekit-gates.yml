@@ -100,7 +100,7 @@ jobs:
 
       - name: Open drift issue on failure
         if: failure()
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const title = "voicekit: azure-ai-voicelive signature drift detected";
