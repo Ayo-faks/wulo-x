@@ -62,7 +62,7 @@ dependencies = [
     "opentelemetry-sdk==1.37.0",
     "opentelemetry-semantic-conventions==0.58b0",
     "opentelemetry-instrumentation==0.58b0",
-    "opentelemetry-instrumentation-fastapi==0.58b0",
+    "opentelemetry-instrumentation-fastapi==0.65b0",
     "opentelemetry-instrumentation-asgi==0.58b0",
     "opentelemetry-instrumentation-requests==0.58b0",
     "opentelemetry-instrumentation-urllib==0.58b0",
