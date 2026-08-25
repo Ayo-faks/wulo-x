@@ -122,7 +122,7 @@ dev = [
     # Docstring coverage
     "interrogate==1.4.0",
     # Pre-commit hooks
-    "pre-commit==2.14.0",
+    "pre-commit==4.6.2",
     # Load testing
     "locust>=2.20.0",
     # Evaluation (Foundry cloud submission)
@@ -166,7 +166,7 @@ dev-all = [
     # Docstring coverage
     "interrogate==1.4.0",
     # Pre-commit hooks
-    "pre-commit==2.14.0",
+    "pre-commit==4.6.2",
     # Load testing
     "locust>=2.20.0",
     # Evaluation (Foundry cloud submission)
