@@ -39,7 +39,7 @@ jobs:
       AGENTOPS_CONFIG: ${{ inputs.config || 'agentops.yaml' }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Azure login (OIDC)
         uses: azure/login@v3
