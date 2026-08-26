@@ -4,6 +4,7 @@ Thank you for improving Wulo-X. Contributions should preserve its core boundary:
 
 ## Before You Start
 
+- Check the [roadmap](ROADMAP.md) for current priorities and the three scoped contribution areas; starter tasks are labelled `good first issue`.
 - Search existing issues before opening a new one.
 - Use synthetic data only. Never submit patient data, phone numbers, call recordings, credentials, access tokens, resource IDs, or production logs.
 - Discuss large behavior or architecture changes in an issue before implementation.

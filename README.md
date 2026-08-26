@@ -4,6 +4,10 @@ Wulo-X is an open-source appointment-recovery and follow-up system for clinics. 
 
 > **Project status:** pre-1.0 engineering preview. Wulo-X is not a medical device and must not diagnose, triage, or provide medical advice. Do not use real patient data until you have completed your own clinical-safety, privacy, security, telecoms, and regulatory review.
 
+![The Wulo-X clinic control room: an escalation and pending booking queue where staff acknowledge urgent items and approve or reject bookings](docs/assets/control-room-inbox.png)
+
+*The clinic control room (synthetic data): urgent and clinical items are escalated to staff, and rebookings wait for human approval.*
+
 ## Core Principles
 
 - AI generates language; deterministic code controls identity, consent, eligibility, booking, money, and external writes.
@@ -12,21 +16,40 @@ Wulo-X is an open-source appointment-recovery and follow-up system for clinics. 
 - Prompt changes are versioned and pass evaluation, ASSERT, and red-team gates before release.
 - Provider effects use durable state and reconciliation rather than unsafe blind retries.
 
+The boundary between what the model may do and what code decides is documented in [docs/deterministic-safety-boundary.md](docs/deterministic-safety-boundary.md).
+
 ## Architecture
+
+![Wulo-X architecture: an AI language plane that only proposes, separated by a deterministic safety boundary from the code that owns identity, consent, booking, and escalation, with humans deciding edge cases in the control room](docs/assets/architecture.svg)
+
+The same flow as a diffable diagram:
 
 ```mermaid
 flowchart LR
-    Staff[Clinic staff] --> Web[React control room]
-    Web --> API[FastAPI service]
-    PMS[Practice-management data] --> Core[Clinic Recall domain]
-    API --> Core
-    Core --> DB[(PostgreSQL + RLS)]
-    Core --> Queue[Durable effects]
-    Queue --> SMS[SMS provider]
-    Queue --> Voice[ACS or Twilio voice]
-    Voice --> Agent[Governed voice agent]
-    Agent --> Core
-    Core --> Staff
+    subgraph world ["Patients & clinic systems"]
+        Patients["Patients<br/>SMS · voice"]
+        PMS["PMS / calendar / CSV"]
+    end
+    subgraph ai ["AI language plane — proposes only"]
+        Agent["Recall & inbound agents<br/>(prompt-as-code)"]
+        Gate["AgentOps gate<br/>eval · ASSERT · red team"]
+    end
+    subgraph det ["Deterministic core — decides"]
+        Core["Clinic Recall domain<br/>identity · consent · eligibility · booking"]
+        Queue["Durable effects + reconciliation"]
+        DB[("PostgreSQL + RLS")]
+    end
+    Staff["Clinic staff<br/>control room (React)"]
+
+    Patients <--> Agent
+    Agent -- "intent only — no authority" --> Core
+    Gate -. "gates every prompt change" .-> Agent
+    PMS --> Core
+    Core --> DB
+    Core --> Queue
+    Queue -- "approved sends via ACS / Twilio" --> Patients
+    Core -- "escalations & pending approvals" --> Staff
+    Staff -- "approve / reject / take over" --> Core
 ```
 
 ## Repository Map
@@ -111,7 +134,7 @@ These commands are cloud-backed and may incur cost. Offline tests do not contact
 
 ## Contributing and Security
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md); never include patient data, credentials, call recordings, or production identifiers in an issue.
+The [roadmap](ROADMAP.md) lists current priorities and three contribution areas that run fully offline; starter tasks are labelled [good first issue](https://github.com/Ayo-faks/wulo-x/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22). See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md); never include patient data, credentials, call recordings, or production identifiers in an issue.
 
 ## License and Attribution
 
