@@ -20,36 +20,46 @@ The boundary between what the model may do and what code decides is documented i
 
 ## Architecture
 
-![Wulo-X architecture: an AI language plane that only proposes, separated by a deterministic safety boundary from the code that owns identity, consent, booking, and escalation, with humans deciding edge cases in the control room](docs/assets/architecture.svg)
+![Wulo-X architecture: patient and clinic signals enter an AI language layer, proposals cross a deterministic safety boundary into reviewed code, then resolve as an approved action, human review, or suppression and audit](docs/assets/architecture-overview.svg)
 
 The same flow as a diffable diagram:
 
+<!-- mermaid-checked: no \n, no em-dash/en-dash, no {} in labels, subgraphs are id["label"], arrows are -->|"label"|, all subgraphs closed by end, ids unique -->
 ```mermaid
 flowchart LR
-    subgraph world ["Patients & clinic systems"]
-        Patients["Patients<br/>SMS · voice"]
-        PMS["PMS / calendar / CSV"]
+    subgraph Signals["Signals"]
+        Patient["Patient SMS or voice"]
+        PMS["PMS calendar or CSV"]
     end
-    subgraph ai ["AI language plane — proposes only"]
-        Agent["Recall & inbound agents<br/>(prompt-as-code)"]
-        Gate["AgentOps gate<br/>eval · ASSERT · red team"]
+    subgraph Language["AI language plane"]
+        Agent["Recall agent"]
+        Gate["Eval ASSERT and red team"]
     end
-    subgraph det ["Deterministic core — decides"]
-        Core["Clinic Recall domain<br/>identity · consent · eligibility · booking"]
-        Queue["Durable effects + reconciliation"]
-        DB[("PostgreSQL + RLS")]
+    Proposal["Proposal only"]
+    subgraph Authority["Deterministic authority"]
+        Policy["Identity consent and policy"]
+        Booking["Booking engine"]
+        Effects["Durable effects"]
+        Data[("PostgreSQL RLS")]
     end
-    Staff["Clinic staff<br/>control room (React)"]
+    subgraph Result["Outcomes"]
+        Send["Approved action"]
+        Human["Human review"]
+        Stop["Suppress and audit"]
+    end
 
-    Patients <--> Agent
-    Agent -- "intent only — no authority" --> Core
-    Gate -. "gates every prompt change" .-> Agent
-    PMS --> Core
-    Core --> DB
-    Core --> Queue
-    Queue -- "approved sends via ACS / Twilio" --> Patients
-    Core -- "escalations & pending approvals" --> Staff
-    Staff -- "approve / reject / take over" --> Core
+    Patient -->|"conversation"| Agent
+    PMS -->|"appointment data"| Policy
+    Gate -.->|"gates prompt changes"| Agent
+    Agent -->|"untrusted model output"| Proposal
+    Proposal -->|"checked by code"| Policy
+    Policy -->|"eligible and clear"| Booking
+    Booking -->|"confirmed slot"| Effects
+    Policy -->|"clinical urgent or uncertain"| Human
+    Policy -->|"opt-out or policy block"| Stop
+    Effects -->|"provider write"| Send
+    Policy --> Data
+    Effects --> Data
 ```
 
 ## Repository Map
