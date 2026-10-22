@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout full history
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Gitleaks
@@ -34,7 +34,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
         with:
@@ -74,7 +74,7 @@ jobs:
       CLINIC_RECALL_TEST_DSN: postgresql+psycopg://clinic_test:clinic_test@localhost:5432/clinic_test
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
         with:
@@ -109,7 +109,7 @@ jobs:
         working-directory: apps/cardapi/mcp_app
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
         with:
@@ -130,7 +130,7 @@ jobs:
         working-directory: apps/artagent/frontend
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -153,7 +153,7 @@ jobs:
         working-directory: infra/terraform
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
       - name: Initialize without backend
